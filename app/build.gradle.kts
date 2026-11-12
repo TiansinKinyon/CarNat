@@ -40,6 +40,7 @@ android {
 
 dependencies {
     implementation(libs.bouncycastle.provider)
+    implementation(libs.dd.plist)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

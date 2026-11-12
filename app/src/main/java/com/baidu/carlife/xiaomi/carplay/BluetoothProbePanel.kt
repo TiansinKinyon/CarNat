@@ -33,6 +33,7 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var name by remember { mutableStateOf("") }
+    var deviceId by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
     var active by remember { mutableStateOf<BluetoothReceiverProbe?>(null) }
 
@@ -44,6 +45,7 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
         }
         val receiver = name.trim()
         val receiverPin = pin
+        val localBluetoothAddress = deviceId.trim()
         val probe = BluetoothReceiverProbe()
         active = probe
         message = "正在启动蓝牙诊断"
@@ -58,7 +60,7 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
         scope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    probe.run(adapter, receiver, receiverPin) { stage ->
+                    probe.run(adapter, receiver, receiverPin, localBluetoothAddress) { stage ->
                         Log.i("CarNatIap2", stage)
                         scope.launch { if (active == probe) message = stage }
                     }
@@ -94,8 +96,19 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        if (validPin) {
+            OutlinedTextField(
+                value = deviceId,
+                onValueChange = { deviceId = it },
+                label = { Text("本机蓝牙地址（主屏连接测试）") },
+                enabled = active == null,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Button(
-            enabled = active != null || name.isNotBlank() && (pin.isEmpty() || validPin),
+            enabled = active != null || name.isNotBlank() && (pin.isEmpty() || validPin) &&
+                (deviceId.isBlank() || validPin && CarPlayScreenProbe.bluetoothAddress.matches(deviceId.trim())),
             onClick = {
                 val probe = active
                 if (probe != null) {
