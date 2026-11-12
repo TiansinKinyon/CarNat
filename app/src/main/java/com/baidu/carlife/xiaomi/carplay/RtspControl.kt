@@ -16,12 +16,26 @@ import java.util.Locale
  */
 internal class RtspControl(
     input: InputStream,
-    private val output: OutputStream,
+    output: OutputStream,
     private val transport: Closeable,
 ) : Closeable {
-    private val input = BufferedInputStream(input)
+    private var input = BufferedInputStream(input)
+    private var output = output
     private var nextSequence = 1
     private var closed = false
+    private var encrypted = false
+
+    /** Switches the existing connection after pair verification has succeeded. */
+    @Synchronized
+    fun enableEncryption(readKey: ByteArray, writeKey: ByteArray) {
+        check(!closed && !encrypted) { "RTSP encryption can only be enabled once" }
+        require(!readKey.contentEquals(writeKey)) { "RTSP directions must use different keys" }
+        val securedInput = CarPlayControlRecords.input(input, readKey)
+        val securedOutput = CarPlayControlRecords.output(output, writeKey)
+        input = BufferedInputStream(securedInput)
+        output = securedOutput
+        encrypted = true
+    }
 
     @Synchronized
     fun request(
