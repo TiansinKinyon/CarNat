@@ -33,9 +33,12 @@ internal object CarPlayScreenProbe {
     ): String {
         require(bluetoothAddress.matches(deviceId))
         val displays = parse(info).objectForKey("displays") as? NSArray
-        val displayId = displays?.array?.firstNotNullOfOrNull { entry ->
-            ((entry as? NSDictionary)?.objectForKey("uuid") as? NSString)?.content
+        val display = displays?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
+            it.objectForKey("uuid") is NSString
         } ?: throw ProtocolException("接收端 /info 缺少显示屏 UUID")
+        val displayId = (display.objectForKey("uuid") as NSString).content
+        val touchWidth = (display.objectForKey("widthPixels") as? NSNumber)?.intValue() ?: 0
+        val touchHeight = (display.objectForKey("heightPixels") as? NSNumber)?.intValue() ?: 0
 
         onStage("正在建立 CarPlay 会话")
         val session = NSDictionary().apply {
@@ -49,7 +52,10 @@ internal object CarPlayScreenProbe {
             put("sessionCorrelationUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
         }
         val eventPort = port(parse(request(control, "SETUP", "/setup", session)), "eventPort")
-        connect(host, eventPort).use {
+        connect(host, eventPort).use { events ->
+            if (touchWidth > 0 && touchHeight > 0) {
+                CarPlayTouchEvents(events, keys, touchWidth, touchHeight).start()
+            }
             onStage("事件通道已连接，正在协商主屏视频")
             val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
             val stream = NSDictionary().apply {

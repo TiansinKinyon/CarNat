@@ -22,6 +22,8 @@ import android.os.Looper
 import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.view.Surface
 import com.baidu.carlife.mixing.CastConfig
 import com.baidu.carlife.mixing.MusicInfo
@@ -174,6 +176,38 @@ class CarlifeConnectService : Service() {
         private var publishedAtMs = 0L
         private var avcConfiguration: ByteArray? = null
         private var inspectedKeyFrame = false
+        private var touchListener: IRemoteTouchListener? = null
+        private var touchDownTime: Long? = null
+        private val touchSink: (Float, Float, Boolean, Boolean) -> Unit = { x, y, down, cancel ->
+            worker.post { sendTouch(x, y, down, cancel) }
+        }
+
+        private fun sendTouch(x: Float, y: Float, down: Boolean, cancel: Boolean) {
+            val listener = touchListener ?: return
+            if (closed || mutableState.value.displayId == null) return
+            val now = SystemClock.uptimeMillis()
+            val prior = touchDownTime
+            val action = when {
+                down && prior == null -> MotionEvent.ACTION_DOWN
+                down -> MotionEvent.ACTION_MOVE
+                prior == null -> return
+                cancel -> MotionEvent.ACTION_CANCEL
+                else -> MotionEvent.ACTION_UP
+            }
+            val start = prior ?: now
+            touchDownTime = if (down) start else null
+            val event = MotionEvent.obtain(start, now, action, x * (WIDTH - 1), y * (HEIGHT - 1), 0)
+            event.source = InputDevice.SOURCE_TOUCHSCREEN
+            try {
+                val accepted = listener.onTouchEvent(event)
+                if (action != MotionEvent.ACTION_MOVE) Log.d(TAG, "CarWith touch action=$action accepted=$accepted")
+            } catch (error: RemoteException) {
+                touchDownTime = null
+                Log.w(TAG, "CarWith touch listener disconnected", error)
+            } finally {
+                event.recycle()
+            }
+        }
         private val timeout = Runnable {
             val message = when {
                 manager == null -> "Timed out binding the CarWith cast service"
@@ -204,8 +238,25 @@ class CarlifeConnectService : Service() {
             }
 
             override fun onServiceReady() { Log.i(TAG, "onServiceReady") }
-            override fun addTouchListener(listener: IRemoteTouchListener?) = Unit
-            override fun removeTouchListener(listener: IRemoteTouchListener?) = Unit
+            override fun addTouchListener(listener: IRemoteTouchListener?) {
+                if (listener == null) return
+                worker.post {
+                    if (!closed) {
+                        touchListener = listener
+                        remoteTouchSink = touchSink
+                    }
+                }
+            }
+
+            override fun removeTouchListener(listener: IRemoteTouchListener?) {
+                worker.post {
+                    if (listener?.asBinder() == touchListener?.asBinder()) {
+                        touchListener = null
+                        touchDownTime = null
+                        if (remoteTouchSink === touchSink) remoteTouchSink = null
+                    }
+                }
+            }
             override fun addKeyListener(listener: IRemoteKeyListener?) = Unit
             override fun removeKeyListener(listener: IRemoteKeyListener?) = Unit
             override fun sendMusicInfo(info: MusicInfo?) = Unit
@@ -355,6 +406,8 @@ class CarlifeConnectService : Service() {
         fun finish() {
             if (closed) return
             closed = true
+            if (remoteTouchSink === touchSink) remoteTouchSink = null
+            touchListener = null
             worker.removeCallbacks(timeout)
             try {
                 manager?.stopCast()
@@ -392,6 +445,13 @@ class CarlifeConnectService : Service() {
         private const val DPI = 160
         private val mutableState = MutableStateFlow(CaptureStatus())
         val state = mutableState.asStateFlow()
+
+        @Volatile
+        private var remoteTouchSink: ((Float, Float, Boolean, Boolean) -> Unit)? = null
+
+        internal fun remoteTouch(x: Float, y: Float, down: Boolean, cancel: Boolean = false) {
+            remoteTouchSink?.invoke(x, y, down, cancel)
+        }
 
         fun startDiagnostic(context: Context) {
             val intent = Intent(context, CarlifeConnectService::class.java).setAction(diagnosticToken)
