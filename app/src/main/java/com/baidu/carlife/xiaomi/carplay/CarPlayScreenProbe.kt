@@ -21,7 +21,7 @@ internal object CarPlayScreenProbe {
     val bluetoothAddress = Regex("(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
     private val plistHeaders = mapOf("Content-Type" to "application/x-apple-binary-plist")
     private const val MAIN_SCREEN = 110
-    const val VIDEO_DIAGNOSTIC_MS = 60_000L
+    private const val FIRST_FRAME_TIMEOUT_MS = 8_000L
 
     fun run(
         host: String,
@@ -30,6 +30,8 @@ internal object CarPlayScreenProbe {
         deviceId: String,
         keys: CarPlaySessionKeys,
         certificate: java.security.cert.X509Certificate,
+        sockets: CarPlaySockets,
+        onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
     ): String {
         require(bluetoothAddress.matches(deviceId))
@@ -53,8 +55,8 @@ internal object CarPlayScreenProbe {
             put("sessionCorrelationUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
         }
         val eventPort = port(parse(request(control, "SETUP", "/setup", session)), "eventPort")
-        connect(host, eventPort).use { events ->
-            CarPlayTouchEvents(events, keys, control, touchWidth, touchHeight, certificate, onStage).start()
+        connect(sockets, host, eventPort).use { events ->
+            CarPlayTouchEvents(events, keys, control, touchWidth, touchHeight, certificate, sockets::close, onStage).start()
             onStage("事件通道已连接，正在协商主屏视频")
             val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
             val stream = NSDictionary().apply {
@@ -72,30 +74,38 @@ internal object CarPlayScreenProbe {
                 (it.objectForKey("type") as? NSNumber)?.longValue() == MAIN_SCREEN.toLong()
             } ?: throw ProtocolException("接收端未返回主屏流")
             val dataPort = port(screen, "dataPort")
-            connect(host, dataPort).use { video ->
+            connect(sockets, host, dataPort).use { video ->
                 request(control, "RECORD", "/", NSDictionary())
                 val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
                 if (!CarlifeConnectService.state.value.active) return connected
                 onStage(connected)
-                return sendVideo(video, keys.video(connectionId), onStage)
+                return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
             }
         }
     }
 
-    private fun sendVideo(video: Socket, key: ByteArray, onStage: (String) -> Unit): String {
+    private fun sendVideo(
+        video: Socket,
+        key: ByteArray,
+        onStreamStarted: () -> Unit,
+        onStage: (String) -> Unit,
+    ): String {
         val feed = CarWithVideoFeed.subscribe()
         try {
             CarlifeConnectService.requestKeyFrame()
             val writer = CarPlayVideoWriter(video.getOutputStream(), key)
-            val deadline = SystemClock.elapsedRealtime() + VIDEO_DIAGNOSTIC_MS
+            val firstFrameDeadline = SystemClock.elapsedRealtime() + FIRST_FRAME_TIMEOUT_MS
             var frames = 0
             var sentBytes = 0L
             var longestWriteMs = 0L
             var nextReport = SystemClock.elapsedRealtime() + 5_000
             var firstPtsUs = 0L
             var firstUnixUs = 0L
-            while (SystemClock.elapsedRealtime() < deadline && CarlifeConnectService.state.value.active) {
+            while (!video.isClosed && CarlifeConnectService.state.value.active) {
                 val now = SystemClock.elapsedRealtime()
+                if (frames == 0 && now >= firstFrameDeadline) {
+                    throw ProtocolException("CarWith 未提供可发送的视频关键帧")
+                }
                 if (now >= nextReport) {
                     val (encoded, dropped) = feed.counts()
                     android.util.Log.i("CarNatVideo", "encoded=$encoded sent=$frames dropped=$dropped payloadBytes=$sentBytes maxWriteMs=$longestWriteMs")
@@ -115,10 +125,13 @@ internal object CarPlayScreenProbe {
                 frames++
                 sentBytes += frame.payload.size
                 longestWriteMs = maxOf(longestWriteMs, SystemClock.elapsedRealtime() - writeStarted)
-                if (frames == 1) onStage("已发送 CarWith 首个视频关键帧")
+                if (frames == 1) {
+                    onStreamStarted()
+                    onStage("正在投屏 · 已发送 CarWith 首个视频关键帧")
+                }
             }
             if (frames == 0) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
-            return "主屏诊断已发送 $frames 帧 CarWith 视频"
+            return "投屏已结束 · 已发送 $frames 帧 CarWith 视频"
         } finally {
             CarWithVideoFeed.unsubscribe(feed)
         }
@@ -143,8 +156,8 @@ internal object CarPlayScreenProbe {
             ?: throw ProtocolException("接收端未返回有效的 $key")
     }
 
-    private fun connect(host: String, port: Int): Socket {
-        val socket = Socket()
+    private fun connect(sockets: CarPlaySockets, host: String, port: Int): Socket {
+        val socket = sockets.open()
         try {
             socket.tcpNoDelay = true
             socket.connect(InetSocketAddress(host, port), 5_000)

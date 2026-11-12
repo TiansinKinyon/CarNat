@@ -50,7 +50,7 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
         active = probe
         message = "正在启动蓝牙诊断"
         val timeout = scope.launch {
-            delay(45_000 + if (localBluetoothAddress.isEmpty()) 0 else CarPlayScreenProbe.VIDEO_DIAGNOSTIC_MS)
+            delay(45_000)
             if (active == probe) {
                 message = "蓝牙诊断超时"
                 active = null
@@ -60,7 +60,7 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
         scope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    probe.run(adapter, receiver, receiverPin, localBluetoothAddress) { stage ->
+                    probe.run(adapter, receiver, receiverPin, localBluetoothAddress, timeout::cancel) { stage ->
                         Log.i("CarNatIap2", stage)
                         scope.launch { if (active == probe) message = stage }
                     }

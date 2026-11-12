@@ -24,6 +24,7 @@ internal class CarPlayTouchEvents(
     private val width: Int,
     private val height: Int,
     private val certificate: java.security.cert.X509Certificate,
+    private val onClosed: () -> Unit,
     private val onStage: (String) -> Unit,
 ) {
     private var pointer: Int? = null
@@ -34,10 +35,12 @@ internal class CarPlayTouchEvents(
         Thread({
             try {
                 receive()
+                if (!socket.isClosed) Log.i("CarNatTouch", "Receiver closed the event channel")
             } catch (error: Exception) {
                 if (!socket.isClosed) Log.w("CarNatTouch", "Event channel ended", error)
             } finally {
                 if (pointer != null) CarlifeConnectService.remoteTouch(x, y, down = false, cancel = true)
+                onClosed()
             }
         }, "CarPlay events").apply { isDaemon = true }.start()
     }

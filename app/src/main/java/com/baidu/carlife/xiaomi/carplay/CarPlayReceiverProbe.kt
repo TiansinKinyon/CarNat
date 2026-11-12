@@ -2,7 +2,6 @@ package com.baidu.carlife.xiaomi.carplay
 
 import java.net.InetSocketAddress
 import java.net.ProtocolException
-import java.net.Socket
 import java.security.cert.X509Certificate
 
 internal object CarPlayReceiverProbe {
@@ -10,9 +9,11 @@ internal object CarPlayReceiverProbe {
         host: String, port: Int, pin: String,
         bluetoothCertificate: X509Certificate? = null,
         deviceId: String = "",
+        sockets: CarPlaySockets = CarPlaySockets(),
+        onStreamStarted: () -> Unit = {},
         onStage: (String) -> Unit,
     ): String {
-        Socket().use { socket ->
+        sockets.open().use { socket ->
             onStage("正在连接接收端")
             socket.connect(InetSocketAddress(host, port), 5_000)
             socket.soTimeout = 8_000
@@ -30,7 +31,7 @@ internal object CarPlayReceiverProbe {
                     val authenticated = "加密网络会话和 MFi-SAP 签名验证通过"
                     if (deviceId.isEmpty()) return authenticated
                     onStage(authenticated)
-                    return CarPlayScreenProbe.run(host, control, info.body, deviceId, keys, bluetoothCertificate, onStage)
+                    return CarPlayScreenProbe.run(host, control, info.body, deviceId, keys, bluetoothCertificate, sockets, onStreamStarted, onStage)
                 }
                 return "接收端身份验证通过 · /info ${info.body.size} 字节"
             }
