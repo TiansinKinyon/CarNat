@@ -72,6 +72,8 @@ private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: ()
                     status.displayId?.let { Text("虚拟显示屏 ID  $it") }
                     Text("视频帧  ${status.frames}")
                     Text("编码数据  ${status.bytes} 字节")
+                    status.avcConfigBytes?.let { Text("AVC 配置  $it 字节") }
+                    status.avcKeyFrameBytes?.let { Text("AVC 关键帧  $it 字节") }
                     status.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
             }

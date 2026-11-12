@@ -32,6 +32,8 @@ import com.baidu.carlife.mixing.aidl.IRemoteKeyListener
 import com.baidu.carlife.mixing.aidl.IRemoteTouchListener
 import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
+import com.baidu.carlife.xiaomi.carplay.AvcPayload
+import java.nio.ByteBuffer
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -169,6 +171,8 @@ class CarlifeConnectService : Service() {
         private var frames = 0L
         private var bytes = 0L
         private var publishedAtMs = 0L
+        private var avcConfiguration: ByteArray? = null
+        private var inspectedKeyFrame = false
         private val timeout = Runnable {
             val message = when {
                 manager == null -> "Timed out binding the CarWith cast service"
@@ -261,7 +265,10 @@ class CarlifeConnectService : Service() {
             codec = encoder
             encoder.setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
-                override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) = Unit
+                override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                    val sps = format.getByteBuffer("csd-0") ?: return
+                    readConfiguration(sps, format.getByteBuffer("csd-1"))
+                }
 
                 override fun onError(codec: MediaCodec, error: MediaCodec.CodecException) {
                     if (!closed) fail(error.diagnosticInfo)
@@ -270,7 +277,11 @@ class CarlifeConnectService : Service() {
                 override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                     if (closed) return
                     try {
-                        codec.releaseOutputBuffer(index, false)
+                        try {
+                            inspectOutput(codec, index, info)
+                        } finally {
+                            codec.releaseOutputBuffer(index, false)
+                        }
                     } catch (error: IllegalStateException) {
                         fail(error.message ?: "Could not release encoder output")
                         return
@@ -291,6 +302,39 @@ class CarlifeConnectService : Service() {
             surface = inputSurface
             encoder.start()
             return inputSurface
+        }
+
+        private fun inspectOutput(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+            if (info.size <= 0 || inspectedKeyFrame) return
+            val configBuffer = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+            val keyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+            if (!configBuffer && !keyFrame) return
+            val data = codec.getOutputBuffer(index)?.duplicate() ?: return
+            data.limit(info.offset + info.size)
+            data.position(info.offset)
+            if (configBuffer) {
+                if (avcConfiguration == null) readConfiguration(data, null)
+                return
+            }
+            val configuration = avcConfiguration ?: return
+            try {
+                val accessUnit = AvcPayload.accessUnit(data)
+                inspectedKeyFrame = true
+                mutableState.update {
+                    it.copy(avcConfigBytes = configuration.size, avcKeyFrameBytes = accessUnit.size)
+                }
+                Log.i(TAG, "CarPlay video input: avcC=${configuration.size}, key frame=${accessUnit.size}")
+            } catch (error: IllegalArgumentException) {
+                Log.w(TAG, "Could not format AVC key frame: ${error.message}")
+            }
+        }
+
+        private fun readConfiguration(sps: ByteBuffer, pps: ByteBuffer?) {
+            try {
+                avcConfiguration = AvcPayload.configuration(sps, pps)
+            } catch (error: IllegalArgumentException) {
+                Log.w(TAG, "Could not format AVC configuration: ${error.message}")
+            }
         }
 
         private fun publishFrames(now: Long) {
@@ -398,6 +442,8 @@ data class CaptureStatus(
     val displayId: Int? = null,
     val frames: Long = 0,
     val bytes: Long = 0,
+    val avcConfigBytes: Int? = null,
+    val avcKeyFrameBytes: Int? = null,
     val error: String? = null,
 ) {
     val active: Boolean
