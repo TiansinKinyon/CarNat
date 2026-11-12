@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -22,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CaptureStatus
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.xiaomi.carplay.ReceiverProbe
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
 class MainActivity : ComponentActivity() {
@@ -57,7 +60,7 @@ private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: ()
 
     Scaffold(modifier = Modifier.fillMaxSize()) { insets ->
         Column(
-            modifier = Modifier.padding(insets).padding(24.dp),
+            modifier = Modifier.padding(insets).verticalScroll(rememberScrollState()).padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text("CarNat", style = MaterialTheme.typography.headlineLarge)
@@ -83,6 +86,7 @@ private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: ()
             if (status.phase == CapturePhase.ARMED && status.setupReady) {
                 Button(onClick = onCapture) { Text("测试当前 CarWith 会话") }
             }
+            ReceiverProbe()
         }
     }
 }
