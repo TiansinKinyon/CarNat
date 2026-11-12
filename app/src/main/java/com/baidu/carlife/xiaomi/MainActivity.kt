@@ -40,16 +40,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStop() {
-        CarlifeConnectService.stopDiagnostic(this)
-        super.onStop()
-    }
 }
 
 @Composable
 private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: () -> Unit) {
     val phase = when (status.phase) {
         CapturePhase.IDLE -> "等待测试"
+        CapturePhase.ARMED -> "请在 CarWith 中发起 CarLife 连接"
         CapturePhase.BINDING -> "正在绑定 CarWith"
         CapturePhase.WAITING_FOR_FRAMES -> "正在等待 CarWith 画面"
         CapturePhase.RECEIVING -> "正在接收 H.264 视频帧"
@@ -70,6 +67,7 @@ private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: ()
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(phase, style = MaterialTheme.typography.titleMedium)
+                    status.connectionType?.let { Text("CarLife 连接类型  $it") }
                     status.displayId?.let { Text("虚拟显示屏 ID  $it") }
                     Text("视频帧  ${status.frames}")
                     Text("编码数据  ${status.bytes} 字节")
@@ -77,7 +75,7 @@ private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: ()
                 }
             }
             Button(onClick = if (status.active) onStop else onStart) {
-                Text(if (status.active) "停止测试" else "测试 CarWith 画面")
+                Text(if (status.active) "停止测试" else "等待 CarWith 连接")
             }
         }
     }
