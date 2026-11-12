@@ -14,6 +14,7 @@ class XiaomiPermissionActivity : Activity() {
         // Only an active opt-in can authorize CarWith to continue its setup.
         val ready = callingPackage == "com.miui.carlink" &&
             CarlifeConnectService.state.value.phase == CapturePhase.ARMED
+        if (ready) CarlifeConnectService.markSetupReady()
         Log.i("CarNatCapture", "CarWith setup readiness: $ready")
         setResult(if (ready) RESULT_OK else RESULT_CANCELED)
         finish()

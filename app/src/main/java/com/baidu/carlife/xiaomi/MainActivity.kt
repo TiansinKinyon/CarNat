@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
                     status = status,
                     onStart = { CarlifeConnectService.startDiagnostic(this) },
                     onStop = { CarlifeConnectService.stopDiagnostic(this) },
+                    onCapture = { CarlifeConnectService.captureAfterSetup(this) },
                 )
             }
         }
@@ -43,7 +44,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: () -> Unit) {
+private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: () -> Unit, onCapture: () -> Unit) {
     val phase = when (status.phase) {
         CapturePhase.IDLE -> "等待测试"
         CapturePhase.ARMED -> "请在 CarWith 中发起 CarLife 连接"
@@ -76,6 +77,9 @@ private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: ()
             }
             Button(onClick = if (status.active) onStop else onStart) {
                 Text(if (status.active) "停止测试" else "等待 CarWith 连接")
+            }
+            if (status.phase == CapturePhase.ARMED && status.setupReady) {
+                Button(onClick = onCapture) { Text("测试当前 CarWith 会话") }
             }
         }
     }

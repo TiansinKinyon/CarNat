@@ -70,26 +70,37 @@ class CarlifeConnectService : Service() {
             }
             return START_NOT_STICKY
         }
+        if (intent?.action == captureToken) {
+            if (mutableState.value.phase == CapturePhase.ARMED && mutableState.value.setupReady) {
+                Log.i(TAG, "User requested capture after CarWith setup")
+                beginCapture(null)
+            }
+            return START_NOT_STICKY
+        }
 
         // The exported service accepts only the fixed CarWith endpoint, during a local opt-in.
         val carWithRequest = intent != null &&
             intent.getStringExtra("bindPackageName") == CAR_WITH_SERVICE.packageName &&
             intent.getStringExtra("bindClassName") == CAR_WITH_SERVICE.className
         if (intent != null && carWithRequest && mutableState.value.phase == CapturePhase.ARMED) {
-            main.removeCallbacks(armTimeout)
             val connectionType = intent.getIntExtra("usb_type", -1)
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
-            mutableState.value = CaptureStatus(phase = CapturePhase.BINDING, connectionType = connectionType)
-            worker.post {
-                CaptureSession().also {
-                    session = it
-                    it.bind()
-                }
-            }
+            beginCapture(connectionType)
         } else if (!mutableState.value.active) {
             stopSelfResult(startId)
         }
         return START_NOT_STICKY
+    }
+
+    private fun beginCapture(connectionType: Int?) {
+        main.removeCallbacks(armTimeout)
+        mutableState.update { it.copy(phase = CapturePhase.BINDING, connectionType = connectionType) }
+        worker.post {
+            CaptureSession().also {
+                session = it
+                it.bind()
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -296,6 +307,7 @@ class CarlifeConnectService : Service() {
             "com.xiaomi.ucar.carlife.CarlifeConnService",
         )
         private val diagnosticToken = UUID.randomUUID().toString()
+        private val captureToken = UUID.randomUUID().toString()
         private const val TAG = "CarNatCapture"
         private const val CHANNEL_ID = "carwith_diagnostics"
         private const val NOTIFICATION_ID = 1
@@ -314,6 +326,14 @@ class CarlifeConnectService : Service() {
         fun stopDiagnostic(context: Context) {
             context.stopService(Intent(context, CarlifeConnectService::class.java))
         }
+
+        fun markSetupReady() {
+            mutableState.update { it.copy(setupReady = true) }
+        }
+
+        fun captureAfterSetup(context: Context) {
+            context.startService(Intent(context, CarlifeConnectService::class.java).setAction(captureToken))
+        }
     }
 }
 
@@ -321,6 +341,7 @@ enum class CapturePhase { IDLE, ARMED, BINDING, WAITING_FOR_FRAMES, RECEIVING, S
 
 data class CaptureStatus(
     val phase: CapturePhase = CapturePhase.IDLE,
+    val setupReady: Boolean = false,
     val connectionType: Int? = null,
     val displayId: Int? = null,
     val frames: Long = 0,
