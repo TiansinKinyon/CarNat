@@ -2,6 +2,7 @@ package com.baidu.carlife.xiaomi.carplay
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.EOFException
 import java.net.ProtocolException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -24,12 +25,16 @@ class Iap2LinkProbeTest {
         val output = ByteArrayOutputStream()
         val stages = mutableListOf<String>()
 
-        Iap2LinkProbe.run(ByteArrayInputStream(input), output, stages::add)
+        assertThrows(EOFException::class.java) {
+            Iap2LinkProbe.run(ByteArrayInputStream(input), output, stages::add)
+        }
 
         assertArrayEquals(
             marker + packet(0xc0, 99, 255, 0, parameters) +
                 packet(0x40, 100, 255, 10, request) +
-                packet(0x40, 100, 0, 0, byteArrayOf()) + packet(0x40, 100, 1, 0, byteArrayOf()),
+                packet(0x40, 100, 0, 0, byteArrayOf()) + packet(0x40, 100, 1, 0, byteArrayOf()) +
+                packet(0x40, 101, 1, 10, byteArrayOf(0x40, 0x40, 0, 6, 0x1d, 2)) +
+                packet(0x40, 102, 1, 10, byteArrayOf(0x40, 0x40, 0, 6, 0xaa.toByte(), 0)),
             output.toByteArray(),
         )
         assertEquals(4, stages.size)

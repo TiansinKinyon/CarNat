@@ -1,9 +1,12 @@
 package com.baidu.carlife.xiaomi.carplay
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ProtocolException
+import java.security.cert.CertificateFactory
 
 internal object Iap2LinkProbe {
     private val detection = byteArrayOf(-1, 0x55, 2, 0, -18, 16)
@@ -16,13 +19,18 @@ internal object Iap2LinkProbe {
         var peerSequence = 0
         var localSequence = 99
         var controlSession = 0
-        val identity = java.io.ByteArrayOutputStream()
+        val controlData = ByteArrayOutputStream()
+        var awaitingCertificate = false
 
-        fun sendIdentification() {
+        fun sendControl(id: Int) {
             localSequence = (localSequence + 1) and 255
-            val request = byteArrayOf(0x40, 0x40, 0, 6, 0x1d, 0)
+            val request = byteArrayOf(0x40, 0x40, 0, 6, (id ushr 8).toByte(), id.toByte())
             output.write(frame(0x40, localSequence, peerSequence, request, controlSession))
             output.flush()
+        }
+
+        fun sendIdentification() {
+            sendControl(0x1d00)
             identificationSent = true
             onStage("已请求 iAP2 接收端身份")
         }
@@ -80,18 +88,33 @@ internal object Iap2LinkProbe {
                             throw ProtocolException("Out-of-order iAP2 control frame")
                         }
                         if (sequence != peerSequence) {
-                            if (identity.size() + length - 10 > 8192) {
-                                throw ProtocolException("iAP2 identification exceeds the size limit")
+                            if (controlData.size() + length - 10 > 8192) {
+                                throw ProtocolException("iAP2 control message exceeds the size limit")
                             }
-                            identity.write(packet, 9, length - 10)
+                            controlData.write(packet, 9, length - 10)
                             peerSequence = sequence
                         }
                         output.write(frame(0x40, localSequence, sequence))
                         output.flush()
-                        val label = receiverIdentity(identity.toByteArray())
-                        if (label != null) {
-                            onStage("已收到 iAP2 接收端身份：$label")
-                            return
+                        while (true) {
+                            val message = takeMessage(controlData) ?: break
+                            val id = unsignedShort(message, 4)
+                            if (!awaitingCertificate) {
+                                if (id != 0x1d01) throw ProtocolException("Expected receiver identification")
+                                onStage("已收到 iAP2 接收端身份：${receiverIdentity(message)}")
+                                sendControl(0x1d02)
+                                sendControl(0xaa00)
+                                awaitingCertificate = true
+                            } else {
+                                if (id != 0xaa01) throw ProtocolException("Expected receiver certificate")
+                                val certificate = parameters(message)[0]
+                                    ?: throw ProtocolException("Receiver did not provide a certificate")
+                                val parsed = CertificateFactory.getInstance("X.509")
+                                    .generateCertificates(ByteArrayInputStream(certificate))
+                                if (parsed.isEmpty()) throw ProtocolException("Empty receiver certificate chain")
+                                onStage("已收到 ${parsed.size} 张 MFi 证书，尚未验证信任链")
+                                return
+                            }
                         }
                     }
                 }
@@ -112,33 +135,42 @@ internal object Iap2LinkProbe {
         throw ProtocolException("Receiver did not advertise an iAP2 control session")
     }
 
-    private fun receiverIdentity(message: ByteArray): String? {
+    private fun takeMessage(buffer: ByteArrayOutputStream): ByteArray? {
+        val message = buffer.toByteArray()
         if (message.size < 6) return null
         val size = unsignedShort(message, 2)
         if (unsignedShort(message, 0) != 0x4040 || size !in 6..8192) {
-            throw ProtocolException("Invalid iAP2 identification message")
+            throw ProtocolException("Invalid iAP2 control message")
         }
         if (message.size < size) return null
-        if (unsignedShort(message, 4) != 0x1d01) {
-            throw ProtocolException("Expected the iAP2 receiver identification response")
-        }
-        var name = ""
-        var version = ""
+        buffer.reset()
+        buffer.write(message, size, message.size - size)
+        return message.copyOf(size)
+    }
+
+    private fun parameters(message: ByteArray): Map<Int, ByteArray> {
+        val fields = mutableMapOf<Int, ByteArray>()
         var offset = 6
-        while (offset < size) {
-            if (size - offset < 4) throw ProtocolException("Truncated iAP2 identification field")
+        while (offset < message.size) {
+            if (message.size - offset < 4) throw ProtocolException("Truncated iAP2 parameter")
             val length = unsignedShort(message, offset)
-            if (length !in 4..(size - offset)) throw ProtocolException("Invalid iAP2 identification field")
+            if (length !in 4..(message.size - offset)) throw ProtocolException("Invalid iAP2 parameter")
             val field = unsignedShort(message, offset + 2)
-            if (field == 0 || field == 4) {
-                val value = message.copyOfRange(offset + 4, offset + length).toString(Charsets.UTF_8)
-                    .substringBefore('\u0000').filterNot(Char::isISOControl).take(64)
-                if (field == 0) name = value else version = value
+            if (fields.put(field, message.copyOfRange(offset + 4, offset + length)) != null) {
+                throw ProtocolException("Duplicate iAP2 parameter")
             }
             offset += length
         }
+        return fields
+    }
+
+    private fun receiverIdentity(message: ByteArray): String {
+        val fields = parameters(message)
+        fun text(field: Int): String = fields[field]?.toString(Charsets.UTF_8)
+            ?.substringBefore('\u0000')?.filterNot(Char::isISOControl)?.take(64).orEmpty()
+        val name = text(0)
         if (name.isBlank()) throw ProtocolException("iAP2 receiver name is missing")
-        return listOf(name, version).filter(String::isNotEmpty).joinToString(" ")
+        return listOf(name, text(4)).filter(String::isNotEmpty).joinToString(" ")
     }
 
     private fun unsignedShort(bytes: ByteArray, offset: Int): Int =
