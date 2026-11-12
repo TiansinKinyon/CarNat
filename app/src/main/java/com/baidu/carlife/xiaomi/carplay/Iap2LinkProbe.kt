@@ -6,7 +6,9 @@ import java.io.DataInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ProtocolException
+import java.security.SecureRandom
 import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 
 internal object Iap2LinkProbe {
     private val detection = byteArrayOf(-1, 0x55, 2, 0, -18, 16)
@@ -21,10 +23,16 @@ internal object Iap2LinkProbe {
         var controlSession = 0
         val controlData = ByteArrayOutputStream()
         var awaitingCertificate = false
+        var challenge: ByteArray? = null
+        var leaf: X509Certificate? = null
 
-        fun sendControl(id: Int) {
+        fun sendControl(id: Int, value: ByteArray? = null) {
             localSequence = (localSequence + 1) and 255
-            val request = byteArrayOf(0x40, 0x40, 0, 6, (id ushr 8).toByte(), id.toByte())
+            val size = if (value == null) 6 else 10 + value.size
+            val header = byteArrayOf(0x40, 0x40, (size ushr 8).toByte(), size.toByte(),
+                (id ushr 8).toByte(), id.toByte())
+            val request = if (value == null) header else
+                header + byteArrayOf(0, (4 + value.size).toByte(), 0, 0) + value
             output.write(frame(0x40, localSequence, peerSequence, request, controlSession))
             output.flush()
         }
@@ -105,14 +113,30 @@ internal object Iap2LinkProbe {
                                 sendControl(0x1d02)
                                 sendControl(0xaa00)
                                 awaitingCertificate = true
-                            } else {
+                            } else if (challenge == null) {
                                 if (id != 0xaa01) throw ProtocolException("Expected receiver certificate")
                                 val certificate = parameters(message)[0]
                                     ?: throw ProtocolException("Receiver did not provide a certificate")
                                 val parsed = CertificateFactory.getInstance("X.509")
                                     .generateCertificates(ByteArrayInputStream(certificate))
-                                if (parsed.isEmpty()) throw ProtocolException("Empty receiver certificate chain")
+                                leaf = parsed.filterIsInstance<X509Certificate>()
+                                    .singleOrNull { it.basicConstraints < 0 }
+                                    ?: throw ProtocolException("Expected one receiver end-entity certificate")
+                                if (leaf.publicKey.algorithm != "EC") {
+                                    throw ProtocolException("This diagnostic supports the WinPlay MFi 3 EC signer")
+                                }
                                 onStage("已收到 ${parsed.size} 张 MFi 证书，尚未验证信任链")
+                                val nonce = ByteArray(32).also(SecureRandom()::nextBytes)
+                                challenge = nonce
+                                sendControl(0xaa02, nonce)
+                            } else {
+                                if (id != 0xaa03) throw ProtocolException("Expected receiver challenge signature")
+                                val signature = parameters(message)[0]
+                                    ?: throw ProtocolException("Receiver signature is missing")
+                                if (!MfiChallenge.verify(checkNotNull(leaf).publicKey, checkNotNull(challenge), signature)) {
+                                    throw ProtocolException("Receiver challenge signature did not match its certificate")
+                                }
+                                onStage("MFi 挑战签名与接收端证书匹配，信任链待验证")
                                 return
                             }
                         }
