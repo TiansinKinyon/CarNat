@@ -102,6 +102,8 @@ internal class CarPlayTouchEvents(
                 val uuid = (command?.objectForKey("uuid") as? NSString)?.content
                 if (type == "hidSendReport" && uuid.equals("2a2a2a2a", ignoreCase = true) && width > 0 && height > 0) {
                     (command?.objectForKey("hidReport") as? NSData)?.bytes()?.let(::touch)
+                } else if (type == "forceKeyFrame") {
+                    CarlifeConnectService.requestKeyFrame()
                 } else if (type == "iAPSendMessage") {
                     val params = command?.objectForKey("params") as? NSDictionary
                     (params?.objectForKey("data") as? NSData)?.bytes()?.let(iap::write)

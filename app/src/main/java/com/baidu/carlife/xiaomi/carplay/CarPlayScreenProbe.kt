@@ -21,7 +21,7 @@ internal object CarPlayScreenProbe {
     val bluetoothAddress = Regex("(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
     private val plistHeaders = mapOf("Content-Type" to "application/x-apple-binary-plist")
     private const val MAIN_SCREEN = 110
-    const val VIDEO_DIAGNOSTIC_MS = 30_000L
+    const val VIDEO_DIAGNOSTIC_MS = 60_000L
 
     fun run(
         host: String,
@@ -85,6 +85,7 @@ internal object CarPlayScreenProbe {
     private fun sendVideo(video: Socket, key: ByteArray, onStage: (String) -> Unit): String {
         val feed = CarWithVideoFeed.subscribe()
         try {
+            CarlifeConnectService.requestKeyFrame()
             val writer = CarPlayVideoWriter(video.getOutputStream(), key)
             val deadline = SystemClock.elapsedRealtime() + VIDEO_DIAGNOSTIC_MS
             var frames = 0

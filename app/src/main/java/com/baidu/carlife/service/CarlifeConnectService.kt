@@ -176,6 +176,17 @@ class CarlifeConnectService : Service() {
         private var publishedAtMs = 0L
         private var avcConfiguration: ByteArray? = null
         private var inspectedKeyFrame = false
+        private val requestSyncFrame: () -> Unit = {
+            worker.post {
+                if (!closed) {
+                    try {
+                        codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+                    } catch (error: IllegalStateException) {
+                        Log.w(TAG, "Encoder sync request failed", error)
+                    }
+                }
+            }
+        }
         private var touchListener: IRemoteTouchListener? = null
         private var touchDownTime: Long? = null
         private val touchSink: (Float, Float, Boolean, Boolean) -> Unit = { x, y, down, cancel ->
@@ -353,6 +364,7 @@ class CarlifeConnectService : Service() {
             val inputSurface = encoder.createInputSurface()
             surface = inputSurface
             encoder.start()
+            keyFrameSink = requestSyncFrame
             return inputSurface
         }
 
@@ -407,6 +419,7 @@ class CarlifeConnectService : Service() {
             if (closed) return
             closed = true
             if (remoteTouchSink === touchSink) remoteTouchSink = null
+            if (keyFrameSink === requestSyncFrame) keyFrameSink = null
             touchListener = null
             worker.removeCallbacks(timeout)
             try {
@@ -448,6 +461,13 @@ class CarlifeConnectService : Service() {
 
         @Volatile
         private var remoteTouchSink: ((Float, Float, Boolean, Boolean) -> Unit)? = null
+
+        @Volatile
+        private var keyFrameSink: (() -> Unit)? = null
+
+        internal fun requestKeyFrame() {
+            keyFrameSink?.invoke()
+        }
 
         internal fun remoteTouch(x: Float, y: Float, down: Boolean, cancel: Boolean = false) {
             remoteTouchSink?.invoke(x, y, down, cancel)
