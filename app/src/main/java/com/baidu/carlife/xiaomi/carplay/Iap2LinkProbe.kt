@@ -25,14 +25,18 @@ internal object Iap2LinkProbe {
         var awaitingCertificate = false
         var challenge: ByteArray? = null
         var leaf: X509Certificate? = null
+        var authenticated = false
 
-        fun sendControl(id: Int, value: ByteArray? = null) {
+        fun sendControl(id: Int, value: ByteArray? = null, parameterId: Int = 0) {
             localSequence = (localSequence + 1) and 255
             val size = if (value == null) 6 else 10 + value.size
             val header = byteArrayOf(0x40, 0x40, (size ushr 8).toByte(), size.toByte(),
                 (id ushr 8).toByte(), id.toByte())
-            val request = if (value == null) header else
-                header + byteArrayOf(0, (4 + value.size).toByte(), 0, 0) + value
+            val request = if (value == null) header else {
+                val parameterLength = 4 + value.size
+                header + byteArrayOf((parameterLength ushr 8).toByte(), parameterLength.toByte(),
+                    (parameterId ushr 8).toByte(), parameterId.toByte()) + value
+            }
             output.write(frame(0x40, localSequence, peerSequence, request, controlSession))
             output.flush()
         }
@@ -107,7 +111,12 @@ internal object Iap2LinkProbe {
                         while (true) {
                             val message = takeMessage(controlData) ?: break
                             val id = unsignedShort(message, 4)
-                            if (!awaitingCertificate) {
+                            if (authenticated) {
+                                if (id == 0x4301) {
+                                    onStage("已收到 CarPlay 网络端点：${receiverEndpoint(message)}")
+                                    return
+                                }
+                            } else if (!awaitingCertificate) {
                                 if (id != 0x1d01) throw ProtocolException("Expected receiver identification")
                                 onStage("已收到 iAP2 接收端身份：${receiverIdentity(message)}")
                                 sendControl(0x1d02)
@@ -122,10 +131,8 @@ internal object Iap2LinkProbe {
                                 leaf = parsed.filterIsInstance<X509Certificate>()
                                     .singleOrNull { it.basicConstraints < 0 }
                                     ?: throw ProtocolException("Expected one receiver end-entity certificate")
-                                if (leaf.publicKey.algorithm != "EC") {
-                                    throw ProtocolException("This diagnostic supports the WinPlay MFi 3 EC signer")
-                                }
-                                onStage("已收到 ${parsed.size} 张 MFi 证书，尚未验证信任链")
+                                MfiTrust.validate(leaf)
+                                onStage("MFi 证书通过 Apple 配件信任链验证")
                                 val nonce = ByteArray(32).also(SecureRandom()::nextBytes)
                                 challenge = nonce
                                 sendControl(0xaa02, nonce)
@@ -136,8 +143,11 @@ internal object Iap2LinkProbe {
                                 if (!MfiChallenge.verify(checkNotNull(leaf).publicKey, checkNotNull(challenge), signature)) {
                                     throw ProtocolException("Receiver challenge signature did not match its certificate")
                                 }
-                                onStage("MFi 挑战签名与接收端证书匹配，信任链待验证")
-                                return
+                                onStage("MFi 挑战签名验证通过")
+                                sendControl(0xaa05)
+                                authenticated = true
+                                // Availability group 1 contains parameter 0 (wireless available = true).
+                                sendControl(0x4300, byteArrayOf(0, 5, 0, 0, 1), parameterId = 1)
                             }
                         }
                     }
@@ -172,9 +182,9 @@ internal object Iap2LinkProbe {
         return message.copyOf(size)
     }
 
-    private fun parameters(message: ByteArray): Map<Int, ByteArray> {
+    private fun parameters(message: ByteArray, start: Int = 6): Map<Int, ByteArray> {
         val fields = mutableMapOf<Int, ByteArray>()
-        var offset = 6
+        var offset = start
         while (offset < message.size) {
             if (message.size - offset < 4) throw ProtocolException("Truncated iAP2 parameter")
             val length = unsignedShort(message, offset)
@@ -188,6 +198,19 @@ internal object Iap2LinkProbe {
         return fields
     }
 
+    private fun receiverEndpoint(message: ByteArray): String {
+        val fields = parameters(message)
+        val network = fields[1]?.let { parameters(it, start = 0) }
+            ?: throw ProtocolException("Missing CarPlay network parameters")
+        val host = network[3]?.toString(Charsets.US_ASCII)?.substringBefore('\u0000')
+            ?.takeIf { it.isNotBlank() && it.all { character -> character in '!'..'~' } }
+            ?: throw ProtocolException("Missing CarPlay endpoint address")
+        val portBytes = fields[2]?.takeIf { it.size == 4 }
+            ?: throw ProtocolException("Invalid CarPlay endpoint port")
+        val port = java.nio.ByteBuffer.wrap(portBytes).int
+        if (port !in 1..65535) throw ProtocolException("Invalid CarPlay endpoint port")
+        return "$host:$port"
+    }
     private fun receiverIdentity(message: ByteArray): String {
         val fields = parameters(message)
         fun text(field: Int): String = fields[field]?.toString(Charsets.UTF_8)
