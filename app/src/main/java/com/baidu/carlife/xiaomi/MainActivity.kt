@@ -1,6 +1,10 @@
 package com.baidu.carlife.xiaomi
 
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
+import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -37,6 +41,7 @@ class MainActivity : ComponentActivity() {
                 CaptureScreen(
                     status = status,
                     onStart = { CarlifeConnectService.startDiagnostic(this) },
+                    onDirect = ::startCarWith,
                     onStop = { CarlifeConnectService.stopDiagnostic(this) },
                     onCapture = { CarlifeConnectService.captureAfterSetup(this) },
                 )
@@ -44,10 +49,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startCarWith() {
+        val entry = ComponentName("com.miui.carlink", "com.miui.carlink.castfwk.usb.CarlifeAdbActivity")
+        CarlifeConnectService.startDiagnostic(this)
+        try {
+            startActivity(Intent().setComponent(entry))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "当前 CarWith 版本没有公开启动入口，请在 CarWith 发起连接", Toast.LENGTH_LONG).show()
+        } catch (_: SecurityException) {
+            Toast.makeText(this, "CarWith 未开放此入口，请在 CarWith 发起连接", Toast.LENGTH_LONG).show()
+        }
+    }
 }
 
 @Composable
-private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: () -> Unit, onCapture: () -> Unit) {
+private fun CaptureScreen(
+    status: CaptureStatus,
+    onStart: () -> Unit,
+    onDirect: () -> Unit,
+    onStop: () -> Unit,
+    onCapture: () -> Unit,
+) {
     val phase = when (status.phase) {
         CapturePhase.IDLE -> "等待测试"
         CapturePhase.ARMED -> "请在 CarWith 中发起 CarLife 连接"
@@ -79,6 +101,9 @@ private fun CaptureScreen(status: CaptureStatus, onStart: () -> Unit, onStop: ()
                     status.avcKeyFrameBytes?.let { Text("AVC 关键帧  $it 字节") }
                     status.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
+            }
+            if (!status.active) {
+                Button(onClick = onDirect) { Text("从手机启动 CarWith") }
             }
             Button(onClick = if (status.active) onStop else onStart) {
                 Text(if (status.active) "停止测试" else "等待 CarWith 连接")
