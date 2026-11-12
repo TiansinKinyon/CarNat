@@ -62,6 +62,21 @@ class CarlifeConnectService : Service() {
     override fun onBind(intent: Intent): IBinder = entryBinder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == stopToken) {
+            main.removeCallbacks(armTimeout)
+            clearArm(this)
+            mutableState.update {
+                if (it.phase == CapturePhase.ARMED) it.copy(phase = CapturePhase.STOPPED) else it
+            }
+            worker.post {
+                session?.finish()
+                session = null
+                main.post {
+                    if (stopSelfResult(startId)) stopForeground(STOP_FOREGROUND_REMOVE)
+                }
+            }
+            return START_NOT_STICKY
+        }
         if (intent?.action == diagnosticToken) {
             if (!mutableState.value.active) {
                 startForeground(NOTIFICATION_ID, diagnosticNotification())
@@ -317,6 +332,7 @@ class CarlifeConnectService : Service() {
         )
         private val diagnosticToken = UUID.randomUUID().toString()
         private val captureToken = UUID.randomUUID().toString()
+        private val stopToken = UUID.randomUUID().toString()
         private const val TAG = "CarNatCapture"
         private const val CHANNEL_ID = "carwith_diagnostics"
         private const val NOTIFICATION_ID = 1
@@ -337,8 +353,7 @@ class CarlifeConnectService : Service() {
         }
 
         fun stopDiagnostic(context: Context) {
-            clearArm(context)
-            context.stopService(Intent(context, CarlifeConnectService::class.java))
+            context.startService(Intent(context, CarlifeConnectService::class.java).setAction(stopToken))
         }
 
         private fun recordArm(context: Context) {
