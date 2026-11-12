@@ -13,8 +13,9 @@ android {
         applicationId = "com.baidu.carlife.xiaomi"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        // CarWith's USB setup requires a CarLife component version code of at least 220.
+        versionCode = 274
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
