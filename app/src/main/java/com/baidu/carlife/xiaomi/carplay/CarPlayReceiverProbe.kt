@@ -30,7 +30,7 @@ internal object CarPlayReceiverProbe {
                     val authenticated = "加密网络会话和 MFi-SAP 签名验证通过"
                     if (deviceId.isEmpty()) return authenticated
                     onStage(authenticated)
-                    return CarPlayScreenProbe.run(host, control, info.body, deviceId, keys, onStage)
+                    return CarPlayScreenProbe.run(host, control, info.body, deviceId, keys, bluetoothCertificate, onStage)
                 }
                 return "接收端身份验证通过 · /info ${info.body.size} 字节"
             }

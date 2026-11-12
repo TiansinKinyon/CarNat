@@ -29,6 +29,7 @@ internal object CarPlayScreenProbe {
         info: ByteArray,
         deviceId: String,
         keys: CarPlaySessionKeys,
+        certificate: java.security.cert.X509Certificate,
         onStage: (String) -> Unit,
     ): String {
         require(bluetoothAddress.matches(deviceId))
@@ -53,9 +54,7 @@ internal object CarPlayScreenProbe {
         }
         val eventPort = port(parse(request(control, "SETUP", "/setup", session)), "eventPort")
         connect(host, eventPort).use { events ->
-            if (touchWidth > 0 && touchHeight > 0) {
-                CarPlayTouchEvents(events, keys, touchWidth, touchHeight).start()
-            }
+            CarPlayTouchEvents(events, keys, control, touchWidth, touchHeight, certificate, onStage).start()
             onStage("事件通道已连接，正在协商主屏视频")
             val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
             val stream = NSDictionary().apply {
@@ -89,10 +88,20 @@ internal object CarPlayScreenProbe {
             val writer = CarPlayVideoWriter(video.getOutputStream(), key)
             val deadline = SystemClock.elapsedRealtime() + VIDEO_DIAGNOSTIC_MS
             var frames = 0
+            var sentBytes = 0L
+            var longestWriteMs = 0L
+            var nextReport = SystemClock.elapsedRealtime() + 5_000
             var firstPtsUs = 0L
             var firstUnixUs = 0L
             while (SystemClock.elapsedRealtime() < deadline && CarlifeConnectService.state.value.active) {
+                val now = SystemClock.elapsedRealtime()
+                if (now >= nextReport) {
+                    val (encoded, dropped) = feed.counts()
+                    android.util.Log.i("CarNatVideo", "encoded=$encoded sent=$frames dropped=$dropped payloadBytes=$sentBytes maxWriteMs=$longestWriteMs")
+                    nextReport = now + 5_000
+                }
                 val frame = feed.poll(200) ?: continue
+                val writeStarted = SystemClock.elapsedRealtime()
                 frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
                 if (frames == 0) {
                     firstPtsUs = frame.ptsUs
@@ -103,6 +112,8 @@ internal object CarPlayScreenProbe {
                 val ntpFraction = (unixUs % 1_000_000 shl 32) / 1_000_000
                 writer.writeAccessUnit(frame.payload, (ntpSeconds shl 32) or ntpFraction)
                 frames++
+                sentBytes += frame.payload.size
+                longestWriteMs = maxOf(longestWriteMs, SystemClock.elapsedRealtime() - writeStarted)
                 if (frames == 1) onStage("已发送 CarWith 首个视频关键帧")
             }
             if (frames == 0) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
@@ -134,6 +145,7 @@ internal object CarPlayScreenProbe {
     private fun connect(host: String, port: Int): Socket {
         val socket = Socket()
         try {
+            socket.tcpNoDelay = true
             socket.connect(InetSocketAddress(host, port), 5_000)
             return socket
         } catch (failure: Exception) {

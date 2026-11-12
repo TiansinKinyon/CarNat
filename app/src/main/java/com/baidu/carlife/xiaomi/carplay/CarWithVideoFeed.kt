@@ -27,11 +27,20 @@ internal object CarWithVideoFeed {
     class Subscription {
         private val frames = ArrayBlockingQueue<Frame>(8)
         private var needsKeyFrame = true
+        private val encoded = java.util.concurrent.atomic.AtomicLong()
+        private val discarded = java.util.concurrent.atomic.AtomicLong()
+
+        fun counts() = encoded.get() to discarded.get()
 
         // Called by the encoder's single callback thread.
         fun offer(data: ByteBuffer, config: ByteArray, width: Int, height: Int, keyFrame: Boolean, ptsUs: Long) {
-            if (needsKeyFrame && !keyFrame) return
+            encoded.incrementAndGet()
+            if (needsKeyFrame && !keyFrame) {
+                discarded.incrementAndGet()
+                return
+            }
             if (frames.remainingCapacity() == 0) {
+                discarded.addAndGet(frames.size.toLong())
                 frames.clear()
                 needsKeyFrame = true
                 if (!keyFrame) return
@@ -39,6 +48,7 @@ internal object CarWithVideoFeed {
             val payload = try {
                 AvcPayload.accessUnit(data)
             } catch (_: IllegalArgumentException) {
+                discarded.addAndGet(frames.size.toLong())
                 frames.clear()
                 needsKeyFrame = true
                 return

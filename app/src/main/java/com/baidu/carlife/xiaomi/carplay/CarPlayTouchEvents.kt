@@ -3,12 +3,16 @@ package com.baidu.carlife.xiaomi.carplay
 import android.util.Log
 import com.baidu.carlife.service.CarlifeConnectService
 import com.dd.plist.BinaryPropertyListParser
+import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSData
 import com.dd.plist.NSDictionary
 import com.dd.plist.NSString
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.IOException
+import java.io.OutputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.net.ProtocolException
 import java.net.Socket
 
@@ -16,8 +20,11 @@ import java.net.Socket
 internal class CarPlayTouchEvents(
     private val socket: Socket,
     private val keys: CarPlaySessionKeys,
+    private val control: RtspControl,
     private val width: Int,
     private val height: Int,
+    private val certificate: java.security.cert.X509Certificate,
+    private val onStage: (String) -> Unit,
 ) {
     private var pointer: Int? = null
     private var x = 0f
@@ -40,6 +47,37 @@ internal class CarPlayTouchEvents(
             socket.getInputStream(), keys.eventRead(),
         )))
         val output = CarPlayControlRecords.output(socket.getOutputStream(), keys.eventWrite())
+        val incomingIap = PipedInputStream(65_536)
+        val iapWriter = PipedOutputStream(incomingIap)
+        val outgoingIap = object : OutputStream() {
+            override fun write(value: Int) = write(byteArrayOf(value.toByte()))
+            override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                val payload = NSDictionary().apply {
+                    put("type", "iAPSendMessage")
+                    put("params", NSDictionary().apply {
+                        put("data", NSData(bytes.copyOfRange(offset, offset + length)))
+                    })
+                }
+                val body = BinaryPropertyListWriter.writeToArray(payload)
+                val response = control.request(
+                    "POST", "/command", mapOf("Content-Type" to "application/x-apple-binary-plist"), body,
+                )
+                if (response.status !in 200..299) throw ProtocolException("iAP2 command rejected: ${response.status}")
+            }
+        }
+        Thread({
+            try {
+                incomingIap.use { Iap2LinkProbe.runNetwork(it, outgoingIap, certificate, onStage) }
+            } catch (error: Exception) {
+                if (!socket.isClosed && error !is java.io.EOFException) {
+                    Log.w("CarNatIap2", "Network iAP2 ended", error)
+                }
+            }
+        }, "CarPlay network iAP2").apply { isDaemon = true }.start()
+        iapWriter.use { readCommands(input, output, it) }
+    }
+
+    private fun readCommands(input: DataInputStream, output: OutputStream, iap: OutputStream) {
         while (true) {
             val start = line(input) ?: return
             val fields = mutableMapOf<String, String>()
@@ -62,12 +100,18 @@ internal class CarPlayTouchEvents(
                 val command = BinaryPropertyListParser.parse(body) as? NSDictionary
                 val type = (command?.objectForKey("type") as? NSString)?.content
                 val uuid = (command?.objectForKey("uuid") as? NSString)?.content
-                if (type == "hidSendReport" && uuid.equals("2a2a2a2a", ignoreCase = true)) {
+                if (type == "hidSendReport" && uuid.equals("2a2a2a2a", ignoreCase = true) && width > 0 && height > 0) {
                     (command?.objectForKey("hidReport") as? NSData)?.bytes()?.let(::touch)
+                } else if (type == "iAPSendMessage") {
+                    val params = command?.objectForKey("params") as? NSDictionary
+                    (params?.objectForKey("data") as? NSData)?.bytes()?.let(iap::write)
+                    iap.flush()
                 }
             }
-            output.write("RTSP/1.0 200 OK\r\nCSeq: $seq\r\nContent-Length: 0\r\n\r\n".toByteArray(Charsets.US_ASCII))
-            output.flush()
+            synchronized(output) {
+                output.write("RTSP/1.0 200 OK\r\nCSeq: $seq\r\nContent-Length: 0\r\n\r\n".toByteArray(Charsets.US_ASCII))
+                output.flush()
+            }
         }
     }
 

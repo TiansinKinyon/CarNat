@@ -15,7 +15,17 @@ internal object Iap2LinkProbe {
 
     class Endpoint(val host: String, val port: Int, val certificate: X509Certificate)
 
-    fun run(input: InputStream, output: OutputStream, onStage: (String) -> Unit): Endpoint {
+    fun run(input: InputStream, output: OutputStream, onStage: (String) -> Unit): Endpoint =
+        exchange(input, output, null, onStage)
+
+    fun runNetwork(input: InputStream, output: OutputStream, certificate: X509Certificate, onStage: (String) -> Unit) {
+        exchange(input, output, certificate, onStage)
+    }
+
+    private fun exchange(
+        input: InputStream, output: OutputStream, expectedCertificate: X509Certificate?,
+        onStage: (String) -> Unit,
+    ): Endpoint {
         val incoming = DataInputStream(input)
         var repliedToDetection = false
         var synchronized = false
@@ -114,7 +124,7 @@ internal object Iap2LinkProbe {
                             val message = takeMessage(controlData) ?: break
                             val id = unsignedShort(message, 4)
                             if (authenticated) {
-                                if (id == 0x4301) {
+                                if (id == 0x4301 && expectedCertificate == null) {
                                     val endpoint = receiverEndpoint(message, checkNotNull(leaf))
                                     onStage("已收到 CarPlay 网络端点：${endpoint.host}:${endpoint.port}")
                                     return endpoint
@@ -134,7 +144,10 @@ internal object Iap2LinkProbe {
                                 leaf = parsed.filterIsInstance<X509Certificate>()
                                     .singleOrNull { it.basicConstraints < 0 }
                                     ?: throw ProtocolException("Expected one receiver end-entity certificate")
-                                MfiTrust.validate(leaf)
+                                if (expectedCertificate == null) MfiTrust.validate(leaf)
+                                else if (!leaf.encoded.contentEquals(expectedCertificate.encoded)) {
+                                    throw ProtocolException("Network iAP2 certificate does not match Bluetooth")
+                                }
                                 onStage("MFi 证书通过 Apple 配件信任链验证")
                                 val nonce = ByteArray(32).also(SecureRandom()::nextBytes)
                                 challenge = nonce
@@ -150,7 +163,11 @@ internal object Iap2LinkProbe {
                                 sendControl(0xaa05)
                                 authenticated = true
                                 // Availability group 1 contains parameter 0 (wireless available = true).
-                                sendControl(0x4300, byteArrayOf(0, 5, 0, 0, 1), parameterId = 1)
+                                if (expectedCertificate == null) {
+                                    sendControl(0x4300, byteArrayOf(0, 5, 0, 0, 1), parameterId = 1)
+                                } else {
+                                    onStage("网络 iAP2 已认证")
+                                }
                             }
                         }
                     }
