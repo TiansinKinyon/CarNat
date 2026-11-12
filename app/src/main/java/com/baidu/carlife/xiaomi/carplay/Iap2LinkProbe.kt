@@ -13,7 +13,7 @@ import java.security.cert.X509Certificate
 internal object Iap2LinkProbe {
     private val detection = byteArrayOf(-1, 0x55, 2, 0, -18, 16)
 
-    fun run(input: InputStream, output: OutputStream, onStage: (String) -> Unit) {
+    fun run(input: InputStream, output: OutputStream, onStage: (String) -> Unit): Pair<String, Int> {
         val incoming = DataInputStream(input)
         var repliedToDetection = false
         var synchronized = false
@@ -113,8 +113,9 @@ internal object Iap2LinkProbe {
                             val id = unsignedShort(message, 4)
                             if (authenticated) {
                                 if (id == 0x4301) {
-                                    onStage("已收到 CarPlay 网络端点：${receiverEndpoint(message)}")
-                                    return
+                                    val endpoint = receiverEndpoint(message)
+                                    onStage("已收到 CarPlay 网络端点：${endpoint.first}:${endpoint.second}")
+                                    return endpoint
                                 }
                             } else if (!awaitingCertificate) {
                                 if (id != 0x1d01) throw ProtocolException("Expected receiver identification")
@@ -198,7 +199,7 @@ internal object Iap2LinkProbe {
         return fields
     }
 
-    private fun receiverEndpoint(message: ByteArray): String {
+    private fun receiverEndpoint(message: ByteArray): Pair<String, Int> {
         val fields = parameters(message)
         val network = fields[1]?.let { parameters(it, start = 0) }
             ?: throw ProtocolException("Missing CarPlay network parameters")
@@ -209,7 +210,7 @@ internal object Iap2LinkProbe {
             ?: throw ProtocolException("Invalid CarPlay endpoint port")
         val port = java.nio.ByteBuffer.wrap(portBytes).int
         if (port !in 1..65535) throw ProtocolException("Invalid CarPlay endpoint port")
-        return "$host:$port"
+        return host to port
     }
     private fun receiverIdentity(message: ByteArray): String {
         val fields = parameters(message)

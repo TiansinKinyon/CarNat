@@ -29,7 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-internal fun BluetoothProbePanel() {
+internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var name by remember { mutableStateOf("") }
@@ -43,6 +43,7 @@ internal fun BluetoothProbePanel() {
             return
         }
         val receiver = name.trim()
+        val receiverPin = pin
         val probe = BluetoothReceiverProbe()
         active = probe
         message = "正在启动蓝牙诊断"
@@ -57,7 +58,7 @@ internal fun BluetoothProbePanel() {
         scope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    probe.run(adapter, receiver) { stage ->
+                    probe.run(adapter, receiver, receiverPin) { stage ->
                         Log.i("CarNatIap2", stage)
                         scope.launch { if (active == probe) message = stage }
                     }
@@ -94,7 +95,7 @@ internal fun BluetoothProbePanel() {
             modifier = Modifier.fillMaxWidth(),
         )
         Button(
-            enabled = name.isNotBlank(),
+            enabled = active != null || name.isNotBlank() && (pin.isEmpty() || validPin),
             onClick = {
                 val probe = active
                 if (probe != null) {

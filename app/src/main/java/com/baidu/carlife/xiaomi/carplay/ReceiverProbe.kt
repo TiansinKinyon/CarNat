@@ -35,12 +35,21 @@ internal fun ReceiverProbe() {
     var message by remember { mutableStateOf("") }
     var running by remember { mutableStateOf(false) }
     val portNumber = port.toIntOrNull()
-    val valid = host.isNotBlank() && portNumber != null && portNumber in 1..65535 &&
-        pin.length in 4..16 && pin.all { it in '0'..'9' || it == '-' }
+    val validPin = pin.count { it in '0'..'9' } >= 4 && pin.all { it in '0'..'9' || it == '-' }
+    val valid = host.isNotBlank() && portNumber != null && portNumber in 1..65535 && validPin
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("CarPlay 接收端配对测试", style = MaterialTheme.typography.titleMedium)
-        BluetoothProbePanel()
+        OutlinedTextField(
+            value = pin,
+            onValueChange = { pin = it.take(16) },
+            label = { Text("接收端配对 PIN") },
+            enabled = !running,
+            visualTransformation = PasswordVisualTransformation(),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        BluetoothProbePanel(pin, validPin)
         OutlinedTextField(
             value = host,
             onValueChange = { host = it },
@@ -55,15 +64,6 @@ internal fun ReceiverProbe() {
             label = { Text("RTSP 端口") },
             enabled = !running,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = pin,
-            onValueChange = { pin = it.take(16) },
-            label = { Text("接收端配对 PIN") },
-            enabled = !running,
-            visualTransformation = PasswordVisualTransformation(),
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )

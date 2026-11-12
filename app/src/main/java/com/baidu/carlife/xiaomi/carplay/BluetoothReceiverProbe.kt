@@ -15,7 +15,7 @@ internal class BluetoothReceiverProbe : Closeable {
     private var closed = false
 
     @SuppressLint("MissingPermission")
-    fun run(adapter: BluetoothAdapter, receiverName: String, onStage: (String) -> Unit) {
+    fun run(adapter: BluetoothAdapter, receiverName: String, pin: String, onStage: (String) -> Unit) {
         val listener = synchronized(this) {
             if (closed) throw IOException("蓝牙诊断已停止")
             adapter.listenUsingRfcommWithServiceRecord("CarPlay", SERVICE_UUID).also { server = it }
@@ -37,7 +37,10 @@ internal class BluetoothReceiverProbe : Closeable {
                 throw IOException("忽略了与指定名称不符的蓝牙连接")
             }
             onStage("蓝牙 RFCOMM 已连接")
-            Iap2LinkProbe.run(connection.inputStream, connection.outputStream, onStage)
+            val (host, port) = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, onStage)
+            if (pin.isNotEmpty()) {
+                onStage(CarPlayReceiverProbe.verify(host, port, pin, onStage))
+            }
         } finally {
             close()
         }
