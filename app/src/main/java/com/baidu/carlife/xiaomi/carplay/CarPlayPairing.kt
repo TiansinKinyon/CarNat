@@ -6,7 +6,7 @@ import java.util.UUID
 
 internal class CarPlayPairing(private val control: RtspControl) {
     private val identity = UUID.randomUUID().toString().toByteArray()
-    private val signingKey = PairingCrypto.generate("Ed25519")
+    private val signingKey = PairingCrypto.signingKey()
 
     /** Establishes a receiver identity with its user-provided PIN, then authenticates the live connection. */
     fun pair(pin: String): CarPlaySessionKeys {
@@ -32,7 +32,7 @@ internal class CarPlayPairing(private val control: RtspControl) {
         val signingMaterial = PairingCrypto.derive(
             srp.key, "Pair-Setup-Controller-Sign-Salt", "Pair-Setup-Controller-Sign-Info",
         )
-        val publicKey = PairingCrypto.publicBytes(signingKey)
+        val publicKey = signingKey.generatePublicKey().encoded
         val request = PairingTlv.encode(
             PairingTlv.IDENTIFIER to identity,
             PairingTlv.PUBLIC_KEY to publicKey,
@@ -53,8 +53,8 @@ internal class CarPlayPairing(private val control: RtspControl) {
     }
 
     private fun verify(receiver: ReceiverIdentity): CarPlaySessionKeys {
-        val ephemeral = PairingCrypto.generate("X25519")
-        val localPublic = PairingCrypto.publicBytes(ephemeral)
+        val ephemeral = PairingCrypto.ephemeralKey()
+        val localPublic = ephemeral.generatePublicKey().encoded
         val challenge = exchange("/pair-verify", 2, PairingTlv.PUBLIC_KEY to localPublic)
         val peerPublic = PairingTlv.requireField(challenge, PairingTlv.PUBLIC_KEY, 32..32)
         val shared = PairingCrypto.sharedSecret(ephemeral, peerPublic)

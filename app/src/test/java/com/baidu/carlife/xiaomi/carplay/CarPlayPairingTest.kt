@@ -46,19 +46,19 @@ class CarPlayPairingTest {
 
     @Test
     fun authenticatesTheEphemeralKeyAgainstThePairedReceiverIdentity() {
-        val controller = PairingCrypto.generate("X25519")
-        val receiver = PairingCrypto.generate("X25519")
-        val controllerPublic = PairingCrypto.publicBytes(controller)
-        val receiverPublic = PairingCrypto.publicBytes(receiver)
+        val controller = PairingCrypto.ephemeralKey()
+        val receiver = PairingCrypto.ephemeralKey()
+        val controllerPublic = controller.generatePublicKey().encoded
+        val receiverPublic = receiver.generatePublicKey().encoded
         val secret = PairingCrypto.sharedSecret(controller, receiverPublic)
         assertArrayEquals(secret, PairingCrypto.sharedSecret(receiver, controllerPublic))
 
-        val signingIdentity = PairingCrypto.generate("Ed25519")
-        val differentIdentity = PairingCrypto.generate("Ed25519")
+        val signingIdentity = PairingCrypto.signingKey()
+        val differentIdentity = PairingCrypto.signingKey()
         val transcript = receiverPublic + "receiver".toByteArray() + controllerPublic
         val signature = PairingCrypto.sign(signingIdentity, transcript)
-        assertTrue(PairingCrypto.verify(PairingCrypto.publicBytes(signingIdentity), transcript, signature))
-        assertFalse(PairingCrypto.verify(PairingCrypto.publicBytes(differentIdentity), transcript, signature))
+        assertTrue(PairingCrypto.verify(signingIdentity.generatePublicKey().encoded, transcript, signature))
+        assertFalse(PairingCrypto.verify(differentIdentity.generatePublicKey().encoded, transcript, signature))
         val key = PairingCrypto.derive(secret, "Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info")
         val sealed = PairingCrypto.seal(key, "PV-Msg02", signature)
         assertArrayEquals(signature, PairingCrypto.open(key, "PV-Msg02", sealed))
