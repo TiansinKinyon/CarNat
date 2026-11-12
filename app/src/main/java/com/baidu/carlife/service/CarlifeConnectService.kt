@@ -33,6 +33,7 @@ import com.baidu.carlife.mixing.aidl.IRemoteTouchListener
 import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
+import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
 import java.nio.ByteBuffer
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -305,10 +306,10 @@ class CarlifeConnectService : Service() {
         }
 
         private fun inspectOutput(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-            if (info.size <= 0 || inspectedKeyFrame) return
+            if (info.size <= 0) return
             val configBuffer = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
             val keyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-            if (!configBuffer && !keyFrame) return
+
             val data = codec.getOutputBuffer(index)?.duplicate() ?: return
             data.limit(info.offset + info.size)
             data.position(info.offset)
@@ -317,6 +318,8 @@ class CarlifeConnectService : Service() {
                 return
             }
             val configuration = avcConfiguration ?: return
+            CarWithVideoFeed.offer(data.slice(), configuration, WIDTH, HEIGHT, keyFrame, info.presentationTimeUs)
+            if (inspectedKeyFrame || !keyFrame) return
             try {
                 val accessUnit = AvcPayload.accessUnit(data)
                 inspectedKeyFrame = true
