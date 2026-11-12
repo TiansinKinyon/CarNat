@@ -12,22 +12,28 @@ class Iap2LinkProbeTest {
     private val marker = byteArrayOf(-1, 0x55, 2, 0, -18, 16)
 
     @Test
-    fun respondsToDetectionOnceAndAcknowledgesValidControlData() {
-        val parameters = byteArrayOf(1, 4, 0x10, 0, 1, 0, 0, 0, 4, 1, 0, 1)
-        val control = byteArrayOf(0x40, 0x40, 0, 6, 0x4e, 0)
+    fun requestsIdentificationAfterPeerAcknowledgesSyncAndReassemblesTheResponse() {
+        val parameters = byteArrayOf(1, 4, 0x10, 0, 1, 0, 0, 0, 4, 1, 10, 0, 1)
+        val request = byteArrayOf(0x40, 0x40, 0, 6, 0x1d, 0)
+        val identity = byteArrayOf(0x40, 0x40, 0, 18, 0x1d, 1, 0, 12, 0, 0) +
+            "WinPlay".toByteArray() + byteArrayOf(0)
         val input = marker + marker + packet(0x80, 255, 0, 0, parameters) +
-            packet(0x40, 0, 99, 1, control)
+            packet(0x40, 255, 99, 0, byteArrayOf()) +
+            packet(0x40, 0, 100, 10, identity.copyOfRange(0, 8)) +
+            packet(0x40, 1, 100, 10, identity.copyOfRange(8, identity.size))
         val output = ByteArrayOutputStream()
         val stages = mutableListOf<String>()
 
         Iap2LinkProbe.run(ByteArrayInputStream(input), output, stages::add)
 
         assertArrayEquals(
-            marker + packet(0xc0, 99, 255, 0, parameters) + packet(0x40, 99, 0, 0, byteArrayOf()),
+            marker + packet(0xc0, 99, 255, 0, parameters) +
+                packet(0x40, 100, 255, 10, request) +
+                packet(0x40, 100, 0, 0, byteArrayOf()) + packet(0x40, 100, 1, 0, byteArrayOf()),
             output.toByteArray(),
         )
-        assertEquals(3, stages.size)
-        assertEquals("已收到 iAP2 控制帧 0x4e00", stages.last())
+        assertEquals(4, stages.size)
+        assertEquals("已收到 iAP2 接收端身份：WinPlay", stages.last())
     }
 
     @Test
