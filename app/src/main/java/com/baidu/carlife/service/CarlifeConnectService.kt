@@ -45,6 +45,7 @@ class CarlifeConnectService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val armTimeout = Runnable {
         if (mutableState.value.phase == CapturePhase.ARMED) {
+            clearArm(this)
             val message = "CarWith did not start its CarLife component"
             Log.w(TAG, message)
             mutableState.value = CaptureStatus(phase = CapturePhase.FAILED, error = message)
@@ -64,9 +65,10 @@ class CarlifeConnectService : Service() {
         if (intent?.action == diagnosticToken) {
             if (!mutableState.value.active) {
                 startForeground(NOTIFICATION_ID, diagnosticNotification())
+                recordArm(this)
                 mutableState.value = CaptureStatus(phase = CapturePhase.ARMED)
                 Log.i(TAG, "Armed for CarWith's CarLife start")
-                main.postDelayed(armTimeout, 90_000)
+                main.postDelayed(armTimeout, ARM_WINDOW_MS)
             }
             return START_NOT_STICKY
         }
@@ -82,17 +84,24 @@ class CarlifeConnectService : Service() {
         val carWithRequest = intent != null &&
             intent.getStringExtra("bindPackageName") == CAR_WITH_SERVICE.packageName &&
             intent.getStringExtra("bindClassName") == CAR_WITH_SERVICE.className
-        if (intent != null && carWithRequest && mutableState.value.phase == CapturePhase.ARMED) {
+        val phase = mutableState.value.phase
+        if (intent != null && carWithRequest &&
+            (phase == CapturePhase.ARMED || (!phase.isActive && hasValidArm(this)))
+        ) {
+            startForeground(NOTIFICATION_ID, diagnosticNotification())
             val connectionType = intent.getIntExtra("usb_type", -1)
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
             beginCapture(connectionType)
         } else if (!mutableState.value.active) {
+            // Even a declined external start must satisfy startForegroundService's contract.
+            startForeground(NOTIFICATION_ID, diagnosticNotification())
             stopSelfResult(startId)
         }
         return START_NOT_STICKY
     }
 
     private fun beginCapture(connectionType: Int?) {
+        clearArm(this)
         main.removeCallbacks(armTimeout)
         mutableState.update { it.copy(phase = CapturePhase.BINDING, connectionType = connectionType) }
         worker.post {
@@ -311,6 +320,10 @@ class CarlifeConnectService : Service() {
         private const val TAG = "CarNatCapture"
         private const val CHANNEL_ID = "carwith_diagnostics"
         private const val NOTIFICATION_ID = 1
+        private const val ARM_WINDOW_MS = 90_000L
+        private const val ARM_PREFERENCES = "capture_opt_in"
+        private const val ARMED_AT = "elapsed_ms"
+        private const val ARMED_AT_WALL = "wall_ms"
         private const val WIDTH = 1280
         private const val HEIGHT = 720
         private const val DPI = 160
@@ -324,7 +337,29 @@ class CarlifeConnectService : Service() {
         }
 
         fun stopDiagnostic(context: Context) {
+            clearArm(context)
             context.stopService(Intent(context, CarlifeConnectService::class.java))
+        }
+
+        private fun recordArm(context: Context) {
+            context.getSharedPreferences(ARM_PREFERENCES, MODE_PRIVATE).edit()
+                .putLong(ARMED_AT, SystemClock.elapsedRealtime())
+                .putLong(ARMED_AT_WALL, System.currentTimeMillis())
+                .commit()
+        }
+
+        private fun hasValidArm(context: Context): Boolean {
+            val preferences = context.getSharedPreferences(ARM_PREFERENCES, MODE_PRIVATE)
+            val elapsedAge = SystemClock.elapsedRealtime() - preferences.getLong(ARMED_AT, 0)
+            val wallAge = System.currentTimeMillis() - preferences.getLong(ARMED_AT_WALL, 0)
+            return elapsedAge in 0 until ARM_WINDOW_MS && wallAge in 0 until ARM_WINDOW_MS
+        }
+
+        private fun clearArm(context: Context) {
+            context.getSharedPreferences(ARM_PREFERENCES, MODE_PRIVATE).edit()
+                .remove(ARMED_AT)
+                .remove(ARMED_AT_WALL)
+                .commit()
         }
 
         fun markSetupReady() {
@@ -337,7 +372,9 @@ class CarlifeConnectService : Service() {
     }
 }
 
-enum class CapturePhase { IDLE, ARMED, BINDING, WAITING_FOR_FRAMES, RECEIVING, STOPPED, FAILED }
+enum class CapturePhase(val isActive: Boolean = false) {
+    IDLE, ARMED(true), BINDING(true), WAITING_FOR_FRAMES(true), RECEIVING(true), STOPPED, FAILED
+}
 
 data class CaptureStatus(
     val phase: CapturePhase = CapturePhase.IDLE,
@@ -349,8 +386,5 @@ data class CaptureStatus(
     val error: String? = null,
 ) {
     val active: Boolean
-        get() = when (phase) {
-            CapturePhase.ARMED, CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES, CapturePhase.RECEIVING -> true
-            else -> false
-        }
+        get() = phase.isActive
 }
