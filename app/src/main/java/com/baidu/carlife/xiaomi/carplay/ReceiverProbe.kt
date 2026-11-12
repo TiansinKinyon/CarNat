@@ -40,6 +40,7 @@ internal fun ReceiverProbe() {
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("CarPlay 接收端配对测试", style = MaterialTheme.typography.titleMedium)
+        BluetoothProbePanel()
         OutlinedTextField(
             value = host,
             onValueChange = { host = it },
