@@ -37,9 +37,9 @@ internal class BluetoothReceiverProbe : Closeable {
                 throw IOException("忽略了与指定名称不符的蓝牙连接")
             }
             onStage("蓝牙 RFCOMM 已连接")
-            val (host, port) = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, onStage)
+            val endpoint = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, onStage)
             if (pin.isNotEmpty()) {
-                onStage(CarPlayReceiverProbe.verify(host, port, pin, onStage))
+                onStage(CarPlayReceiverProbe.verify(endpoint.host, endpoint.port, pin, endpoint.certificate, onStage))
             }
         } finally {
             close()

@@ -13,7 +13,9 @@ import java.security.cert.X509Certificate
 internal object Iap2LinkProbe {
     private val detection = byteArrayOf(-1, 0x55, 2, 0, -18, 16)
 
-    fun run(input: InputStream, output: OutputStream, onStage: (String) -> Unit): Pair<String, Int> {
+    class Endpoint(val host: String, val port: Int, val certificate: X509Certificate)
+
+    fun run(input: InputStream, output: OutputStream, onStage: (String) -> Unit): Endpoint {
         val incoming = DataInputStream(input)
         var repliedToDetection = false
         var synchronized = false
@@ -113,8 +115,8 @@ internal object Iap2LinkProbe {
                             val id = unsignedShort(message, 4)
                             if (authenticated) {
                                 if (id == 0x4301) {
-                                    val endpoint = receiverEndpoint(message)
-                                    onStage("已收到 CarPlay 网络端点：${endpoint.first}:${endpoint.second}")
+                                    val endpoint = receiverEndpoint(message, checkNotNull(leaf))
+                                    onStage("已收到 CarPlay 网络端点：${endpoint.host}:${endpoint.port}")
                                     return endpoint
                                 }
                             } else if (!awaitingCertificate) {
@@ -199,7 +201,7 @@ internal object Iap2LinkProbe {
         return fields
     }
 
-    private fun receiverEndpoint(message: ByteArray): Pair<String, Int> {
+    private fun receiverEndpoint(message: ByteArray, certificate: X509Certificate): Endpoint {
         val fields = parameters(message)
         val network = fields[1]?.let { parameters(it, start = 0) }
             ?: throw ProtocolException("Missing CarPlay network parameters")
@@ -210,7 +212,7 @@ internal object Iap2LinkProbe {
             ?: throw ProtocolException("Invalid CarPlay endpoint port")
         val port = java.nio.ByteBuffer.wrap(portBytes).int
         if (port !in 1..65535) throw ProtocolException("Invalid CarPlay endpoint port")
-        return host to port
+        return Endpoint(host, port, certificate)
     }
     private fun receiverIdentity(message: ByteArray): String {
         val fields = parameters(message)

@@ -3,9 +3,14 @@ package com.baidu.carlife.xiaomi.carplay
 import java.net.InetSocketAddress
 import java.net.ProtocolException
 import java.net.Socket
+import java.security.cert.X509Certificate
 
 internal object CarPlayReceiverProbe {
-    fun verify(host: String, port: Int, pin: String, onStage: (String) -> Unit): String {
+    fun verify(
+        host: String, port: Int, pin: String,
+        bluetoothCertificate: X509Certificate? = null,
+        onStage: (String) -> Unit,
+    ): String {
         Socket().use { socket ->
             onStage("正在连接接收端")
             socket.connect(InetSocketAddress(host, port), 5_000)
@@ -18,6 +23,11 @@ internal object CarPlayReceiverProbe {
                 }
                 onStage("正在验证配对 PIN 和接收端身份")
                 CarPlayPairing(control).pair(pin)
+                if (bluetoothCertificate != null) {
+                    onStage("正在验证加密网络会话的 MFi-SAP 签名")
+                    MfiSap.verify(control, bluetoothCertificate)
+                    return "加密网络会话和 MFi-SAP 签名验证通过"
+                }
                 return "接收端身份验证通过 · /info ${info.body.size} 字节"
             }
         }
