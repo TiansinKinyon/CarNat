@@ -1,13 +1,17 @@
 package com.baidu.carlife.xiaomi
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,19 +20,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.baidu.carlife.service.CapturePhase
-import com.baidu.carlife.service.CaptureStatus
 import com.baidu.carlife.service.CarlifeConnectService
-import com.baidu.carlife.xiaomi.carplay.ReceiverProbe
+import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
 class MainActivity : ComponentActivity() {
@@ -37,81 +43,65 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val status by CarlifeConnectService.state.collectAsState()
-            CarNatTheme {
-                CaptureScreen(
-                    status = status,
-                    onStart = { CarlifeConnectService.startDiagnostic(this) },
-                    onDirect = ::startCarWith,
-                    onStop = { CarlifeConnectService.stopDiagnostic(this) },
-                    onCapture = { CarlifeConnectService.captureAfterSetup(this) },
-                )
+            var settings by remember { mutableStateOf(ReceiverSettings.load(this)) }
+            var error by remember { mutableStateOf<String?>(null) }
+            val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                if (granted) error = startProjection(settings)
+                else error = "投屏需要附近设备权限"
             }
-        }
-    }
-
-    private fun startCarWith() {
-        val entry = ComponentName("com.miui.carlink", "com.miui.carlink.castfwk.usb.CarlifeAdbActivity")
-        CarlifeConnectService.startDiagnostic(this)
-        try {
-            startActivity(Intent().setComponent(entry))
-        } catch (_: ActivityNotFoundException) {
-            Toast.makeText(this, "当前 CarWith 版本没有公开启动入口，请在 CarWith 发起连接", Toast.LENGTH_LONG).show()
-        } catch (_: SecurityException) {
-            Toast.makeText(this, "CarWith 未开放此入口，请在 CarWith 发起连接", Toast.LENGTH_LONG).show()
-        }
-    }
-}
-
-@Composable
-private fun CaptureScreen(
-    status: CaptureStatus,
-    onStart: () -> Unit,
-    onDirect: () -> Unit,
-    onStop: () -> Unit,
-    onCapture: () -> Unit,
-) {
-    val phase = when (status.phase) {
-        CapturePhase.IDLE -> "等待测试"
-        CapturePhase.ARMED -> "请在 CarWith 中发起 CarLife 连接"
-        CapturePhase.BINDING -> "正在绑定 CarWith"
-        CapturePhase.WAITING_FOR_FRAMES -> "正在等待 CarWith 画面"
-        CapturePhase.RECEIVING -> "正在接收 H.264 视频帧"
-        CapturePhase.STOPPED -> "测试已停止"
-        CapturePhase.FAILED -> "测试失败"
-    }
-
-    Scaffold(modifier = Modifier.fillMaxSize()) { insets ->
-        Column(
-            modifier = Modifier.padding(insets).verticalScroll(rememberScrollState()).padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Text("CarNat", style = MaterialTheme.typography.headlineLarge)
-            Text("CarWith 投屏诊断", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(phase, style = MaterialTheme.typography.titleMedium)
-                    status.connectionType?.let { Text("CarLife 连接类型  $it") }
-                    status.displayId?.let { Text("虚拟显示屏 ID  $it") }
-                    Text("视频帧  ${status.frames}")
-                    Text("编码数据  ${status.bytes} 字节")
-                    status.avcConfigBytes?.let { Text("AVC 配置  $it 字节") }
-                    status.avcKeyFrameBytes?.let { Text("AVC 关键帧  $it 字节") }
-                    status.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            CarNatTheme {
+                Scaffold(modifier = Modifier.fillMaxSize()) { insets ->
+                    Column(
+                        Modifier.padding(insets).verticalScroll(rememberScrollState()).padding(24.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Text("CarNat", style = MaterialTheme.typography.headlineLarge)
+                        if (Build.VERSION.SDK_INT < 33) {
+                            Text("CarPlay 投屏需要 Android 13 或更新版本")
+                        } else {
+                            if (!status.active) {
+                                OutlinedTextField(settings.name, { settings = settings.copy(name = it) },
+                                    label = { Text("接收端蓝牙名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                OutlinedTextField(settings.address, { settings = settings.copy(address = it) },
+                                    label = { Text("本机蓝牙地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                OutlinedTextField(settings.pin, { settings = settings.copy(pin = it.take(16)) },
+                                    label = { Text("接收端配对 PIN") }, visualTransformation = PasswordVisualTransformation(),
+                                    singleLine = true, modifier = Modifier.fillMaxWidth())
+                            }
+                            Button(enabled = status.active || settings.valid, onClick = {
+                                error = null
+                                if (status.active) CarlifeConnectService.stopDiagnostic(this@MainActivity)
+                                else if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                                    error = startProjection(settings)
+                                } else permission.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                            }) { Text(if (status.active) "停止投屏" else "开始投屏") }
+                            val message = error ?: status.error ?: status.receiverStatus ?: when (status.phase) {
+                                CapturePhase.ARMED -> "正在启动 CarWith"
+                                CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
+                                CapturePhase.STOPPED -> "投屏已停止"
+                                else -> null
+                            }
+                            if (message != null) Text(message)
+                        }
+                    }
                 }
             }
-            if (!status.active) {
-                Button(onClick = onDirect) { Text("从手机启动 CarWith") }
-            }
-            Button(onClick = if (status.active) onStop else onStart) {
-                Text(if (status.active) "停止测试" else "等待 CarWith 连接")
-            }
-            if (status.phase == CapturePhase.ARMED && status.setupReady) {
-                Button(onClick = onCapture) { Text("测试当前 CarWith 会话") }
-            }
-            ReceiverProbe()
+        }
+    }
+
+    private fun startProjection(settings: ReceiverSettings): String? {
+        if (!settings.valid || !settings.save(this)) return "无法保存接收端设置"
+        val entry = ComponentName("com.miui.carlink", "com.miui.carlink.castfwk.usb.CarlifeAdbActivity")
+        CarlifeConnectService.startDiagnostic(this)
+        return try {
+            startActivity(Intent().setComponent(entry))
+            null
+        } catch (_: ActivityNotFoundException) {
+            CarlifeConnectService.stopDiagnostic(this@MainActivity)
+            "当前 CarWith 版本没有公开启动入口"
+        } catch (_: SecurityException) {
+            CarlifeConnectService.stopDiagnostic(this@MainActivity)
+            "CarWith 未开放投屏启动入口"
         }
     }
 }

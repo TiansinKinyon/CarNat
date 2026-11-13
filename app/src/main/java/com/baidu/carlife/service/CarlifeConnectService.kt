@@ -1,6 +1,7 @@
 package com.baidu.carlife.service
 
 import android.app.Service
+import android.bluetooth.BluetoothManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -40,12 +41,71 @@ import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
 import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
 import java.nio.ByteBuffer
 import java.util.UUID
+import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
+import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 class CarlifeConnectService : Service() {
     private val entryBinder = Binder()
+    private val projectionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var receiverProbe: BluetoothReceiverProbe? = null
+    private var receiverJob: Job? = null
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startReceiver() {
+        val settings = ReceiverSettings.load(this)
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
+        if (!settings.valid || adapter == null || checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            mutableState.update { it.copy(receiverStatus = "请检查接收端设置和附近设备权限") }
+            return
+        }
+        val probe = BluetoothReceiverProbe()
+        receiverProbe = probe
+        val timeout = projectionScope.launch {
+            delay(45_000)
+            mutableState.update { it.copy(receiverStatus = "等待接收端超时") }
+            stopReceiver()
+        }
+        receiverJob = projectionScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    probe.run(adapter, settings.name, settings.pin, settings.address, { timeout.cancel() }) { stage ->
+                        Log.i("CarNatIap2", stage)
+                        projectionScope.launch {
+                            if (receiverProbe === probe) mutableState.update { it.copy(receiverStatus = stage) }
+                        }
+                    }
+                }
+            } catch (failure: Exception) {
+                if (receiverProbe === probe) {
+                    Log.i("CarNatIap2", "Receiver session ended", failure)
+                    mutableState.update { it.copy(receiverStatus = failure.message ?: "投屏连接失败") }
+                }
+            } finally {
+                timeout.cancel()
+                if (receiverProbe === probe) receiverProbe = null
+            }
+        }
+    }
+
+    private fun stopReceiver() {
+        receiverProbe?.close()
+        receiverProbe = null
+        receiverJob?.cancel()
+        receiverJob = null
+    }
     private lateinit var worker: Handler
     private lateinit var thread: HandlerThread
     private var session: CaptureSession? = null
@@ -70,14 +130,16 @@ class CarlifeConnectService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == stopToken) {
+            stopReceiver()
             main.removeCallbacks(armTimeout)
             clearArm(this)
             mutableState.update {
-                if (it.phase == CapturePhase.ARMED) it.copy(phase = CapturePhase.STOPPED) else it
+                if (it.phase == CapturePhase.ARMED) it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) else it
             }
             worker.post {
                 session?.finish()
                 session = null
+                mutableState.update { it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) }
                 main.post {
                     if (stopSelfResult(startId)) stopForeground(STOP_FOREGROUND_REMOVE)
                 }
@@ -126,6 +188,7 @@ class CarlifeConnectService : Service() {
         clearArm(this)
         main.removeCallbacks(armTimeout)
         mutableState.update { it.copy(phase = CapturePhase.BINDING, connectionType = connectionType) }
+        startReceiver()
         worker.post {
             CaptureSession().also {
                 session = it
@@ -135,9 +198,11 @@ class CarlifeConnectService : Service() {
     }
 
     override fun onDestroy() {
+        stopReceiver()
+        projectionScope.cancel()
         main.removeCallbacks(armTimeout)
         mutableState.update {
-            if (it.phase == CapturePhase.ARMED) it.copy(phase = CapturePhase.STOPPED) else it
+            if (it.phase == CapturePhase.ARMED) it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) else it
         }
         worker.post {
             session?.finish()
@@ -617,6 +682,7 @@ data class CaptureStatus(
     val avcConfigBytes: Int? = null,
     val avcKeyFrameBytes: Int? = null,
     val error: String? = null,
+    val receiverStatus: String? = null,
 ) {
     val active: Boolean
         get() = phase.isActive
