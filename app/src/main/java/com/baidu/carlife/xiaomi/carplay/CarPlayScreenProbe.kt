@@ -33,7 +33,7 @@ internal object CarPlayScreenProbe {
         sockets: CarPlaySockets,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
-    ): String {
+    ): String = CarPlayTiming(host).use { timing ->
         require(bluetoothAddress.matches(deviceId))
         val receiverInfo = parse(info)
         val displays = receiverInfo.objectForKey("displays") as? NSArray
@@ -46,6 +46,7 @@ internal object CarPlayScreenProbe {
 
         onStage("正在建立 CarPlay 会话")
         val session = NSDictionary().apply {
+            put("timingPort", timing.port)
             put("deviceID", deviceId.uppercase(Locale.ROOT))
             put("name", "CarNat")
             put("model", Build.MODEL)
@@ -163,7 +164,7 @@ internal object CarPlayScreenProbe {
             var longestWriteMs = 0L
             var nextReport = SystemClock.elapsedRealtime() + 5_000
             var firstPtsUs = 0L
-            var firstUnixUs = 0L
+            var firstNtp = 0L
             while (!video.isClosed && CarlifeConnectService.state.value.active) {
                 val now = SystemClock.elapsedRealtime()
                 if (frames == 0 && now >= firstFrameDeadline) {
@@ -179,12 +180,12 @@ internal object CarPlayScreenProbe {
                 frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
                 if (frames == 0) {
                     firstPtsUs = frame.ptsUs
-                    firstUnixUs = System.currentTimeMillis() * 1000
+                    firstNtp = CarPlayTiming.now()
                 }
-                val unixUs = firstUnixUs + frame.ptsUs - firstPtsUs
-                val ntpSeconds = unixUs / 1_000_000 + 2_208_988_800L
-                val ntpFraction = (unixUs % 1_000_000 shl 32) / 1_000_000
-                writer.writeAccessUnit(frame.payload, (ntpSeconds shl 32) or ntpFraction)
+                val elapsedUs = frame.ptsUs - firstPtsUs
+                val offset = ((elapsedUs / 1_000_000) shl 32) +
+                    (((elapsedUs % 1_000_000) shl 32) / 1_000_000)
+                writer.writeAccessUnit(frame.payload, firstNtp + offset)
                 frames++
                 sentBytes += frame.payload.size
                 longestWriteMs = maxOf(longestWriteMs, SystemClock.elapsedRealtime() - writeStarted)
