@@ -43,6 +43,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity-alias
+            android:name="com.baidu.carlife.CarlifeActivity"
+            android:targetActivity=".MainActivity"
+            android:exported="true" />
     </application>
 
 </manifest>
