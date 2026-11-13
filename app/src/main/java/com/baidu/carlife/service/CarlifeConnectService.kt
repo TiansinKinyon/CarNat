@@ -35,6 +35,7 @@ import com.baidu.carlife.mixing.aidl.IRemoteTouchListener
 import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
+import com.baidu.carlife.xiaomi.carplay.CarPlayPcmAudio
 import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
 import java.nio.ByteBuffer
 import java.util.UUID
@@ -229,7 +230,8 @@ class CarlifeConnectService : Service() {
         }
 
         private val audioCallback = object : ISystemAudioCallback.Stub() {
-            override fun onAudioStreamReady(data: ByteArray?, offset: Int, length: Int, sampleRate: Int, channels: Int) = Unit
+            override fun onAudioStreamReady(data: ByteArray?, offset: Int, length: Int, sampleRate: Int, channels: Int) =
+                CarPlayPcmAudio.offer(data, offset, length, sampleRate, channels)
             override fun onAudioStateChange(stream: Int, state: Int) = Unit
             override fun onAudioStateChangeWithParams(stream: Int, state: Int, sampleRate: Int, channels: Int, format: Int) = Unit
         }

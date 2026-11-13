@@ -35,7 +35,8 @@ internal object CarPlayScreenProbe {
         onStage: (String) -> Unit,
     ): String {
         require(bluetoothAddress.matches(deviceId))
-        val displays = parse(info).objectForKey("displays") as? NSArray
+        val receiverInfo = parse(info)
+        val displays = receiverInfo.objectForKey("displays") as? NSArray
         val display = displays?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
             it.objectForKey("uuid") is NSString
         } ?: throw ProtocolException("接收端 /info 缺少显示屏 UUID")
@@ -75,13 +76,49 @@ internal object CarPlayScreenProbe {
             } ?: throw ProtocolException("接收端未返回主屏流")
             val dataPort = port(screen, "dataPort")
             connect(sockets, host, dataPort).use { video ->
-                request(control, "RECORD", "/", NSDictionary())
-                val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
-                if (!CarlifeConnectService.state.value.active) return connected
-                onStage(connected)
-                return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                openAudio(receiverInfo, host, control, keys).use { audio ->
+                    request(control, "RECORD", "/", NSDictionary())
+                    audio?.start()
+                    val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
+                    if (!CarlifeConnectService.state.value.active) return connected
+                    onStage(connected)
+                    return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                }
             }
         }
+    }
+
+    private fun openAudio(
+        info: NSDictionary, host: String, control: RtspControl, keys: CarPlaySessionKeys,
+    ): CarPlayPcmAudio? {
+        val formats = info.objectForKey("audioFormats") as? NSArray ?: return null
+        val media = formats.array.filterIsInstance<NSDictionary>().firstOrNull {
+            (it.objectForKey("type") as? NSNumber)?.intValue() == CarPlayPcmAudio.TYPE &&
+                (it.objectForKey("audioType") as? NSString)?.content == "media"
+        } ?: return null
+        val mask = (media.objectForKey("audioOutputFormats") as? NSNumber)?.intValue() ?: return null
+        val (format, rate) = when {
+            mask and 0x800 != 0 -> 0x800 to 44_100
+            mask and 0x8000 != 0 -> 0x8000 to 48_000
+            else -> return null
+        }
+        val id = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
+        val stream = NSDictionary().apply {
+            put("type", CarPlayPcmAudio.TYPE)
+            put("audioType", "media")
+            put("audioFormat", format)
+            put("audioLatencyMs", 120)
+            put("streamConnectionID", id)
+        }
+        val body = NSDictionary().apply {
+            put("streams", NSArray(1).apply { setValue(0, stream) })
+        }
+        val reply = parse(request(control, "SETUP", "/", body))
+        val streams = reply.objectForKey("streams") as? NSArray
+        val response = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
+            (it.objectForKey("type") as? NSNumber)?.intValue() == CarPlayPcmAudio.TYPE
+        } ?: return null
+        return CarPlayPcmAudio(host, port(response, "dataPort"), keys.video(id), rate)
     }
 
     private fun sendVideo(
