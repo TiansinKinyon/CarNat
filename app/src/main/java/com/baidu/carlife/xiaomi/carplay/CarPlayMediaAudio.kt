@@ -12,6 +12,8 @@ import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -21,6 +23,11 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
     private val socket = DatagramSocket().apply { connect(InetSocketAddress(host, port)) }
     private val secret = SecretKeySpec(key, "ChaCha20")
     private val queue = ArrayBlockingQueue<Chunk>(16)
+    private val droppedChunks = AtomicLong()
+    private var encoderInputMisses = 0L
+    private var nextPacketAt = 0L
+    private var lastReportAt = 0L
+    private val packetInterval = (if (aac) 1024L else 240L) * 1_000_000_000 / rate
     private var sequence = 0L
     private var samples = 0
     private var remainder = 0
@@ -86,6 +93,8 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
             checkNotNull(encoder.getInputBuffer(index)).put(payload.array())
             encoder.queueInputBuffer(index, 0, payload.capacity(), inputSamples * 1_000_000 / rate, 0)
             inputSamples += 1024
+        } else {
+            encoderInputMisses++
         }
         while (true) {
             val output = encoder.dequeueOutputBuffer(outputInfo, 0)
@@ -121,7 +130,23 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
         cipher.init(Cipher.ENCRYPT_MODE, secret, IvParameterSpec(nonce))
         cipher.updateAAD(header, 4, 8)
         val packet = header + cipher.doFinal(audio) + nonce.copyOfRange(4, 12)
+        // Binder and MediaCodec may deliver several access units in a single burst.
+        // Re-anchor after a stall so the next burst cannot flood the receiver.
+        if (aac) {
+            var wait = nextPacketAt - System.nanoTime()
+            while (wait > 0) {
+                TimeUnit.NANOSECONDS.sleep(wait)
+                wait = nextPacketAt - System.nanoTime()
+            }
+            val now = System.nanoTime()
+            nextPacketAt = now + packetInterval
+        }
         socket.send(DatagramPacket(packet, packet.size))
+        val sentAt = System.nanoTime()
+        if (sequence == 0L || sentAt - lastReportAt >= 5_000_000_000L) {
+            Log.i(TAG, "Audio packets=${sequence + 1} queue=${queue.size} droppedChunks=${droppedChunks.get()} encoderInputMisses=$encoderInputMisses")
+            lastReportAt = sentAt
+        }
         if (sequence == 0L) Log.i(TAG, "Sent first CarWith audio packet, AAC=$aac rate=$rate")
         sequence++
         samples += payload.capacity() / 4
@@ -157,7 +182,7 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
             if (pcm.size % (channels * 2) != 0) return
             val chunk = Chunk(pcm, rate, channels)
             if (!stream.queue.offer(chunk)) {
-                stream.queue.poll()
+                if (stream.queue.poll() != null) stream.droppedChunks.incrementAndGet()
                 stream.queue.offer(chunk)
             }
         }
