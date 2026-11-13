@@ -231,7 +231,7 @@ class CarlifeConnectService : Service() {
 
         private val audioCallback = object : ISystemAudioCallback.Stub() {
             override fun onAudioStreamReady(data: ByteArray?, stream: Int, sampleRate: Int, channels: Int, format: Int) =
-                CarPlayMediaAudio.offer(data, sampleRate, channels, format)
+                CarPlayMediaAudio.offer(data, stream, sampleRate, channels, format)
             override fun onAudioStateChange(stream: Int, state: Int) {
                 Log.d(TAG, "CarWith audio stream=$stream state=$state")
             }

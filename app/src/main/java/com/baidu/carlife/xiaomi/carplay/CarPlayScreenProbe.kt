@@ -76,13 +76,16 @@ internal object CarPlayScreenProbe {
             } ?: throw ProtocolException("接收端未返回主屏流")
             val dataPort = port(screen, "dataPort")
             connect(sockets, host, dataPort).use { video ->
-                openAudio(receiverInfo, host, control, keys).use { audio ->
-                    request(control, "RECORD", "/", NSDictionary())
-                    audio?.start()
-                    val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
-                    if (!CarlifeConnectService.state.value.active) return connected
-                    onStage(connected)
-                    return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                openAudio(receiverInfo, host, control, keys, navigation = false).use { audio ->
+                    openAudio(receiverInfo, host, control, keys, navigation = true).use { navigation ->
+                        request(control, "RECORD", "/", NSDictionary())
+                        audio?.start()
+                        navigation?.start()
+                        val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
+                        if (!CarlifeConnectService.state.value.active) return connected
+                        onStage(connected)
+                        return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                    }
                 }
             }
         }
@@ -90,17 +93,24 @@ internal object CarPlayScreenProbe {
 
     private fun openAudio(
         info: NSDictionary, host: String, control: RtspControl, keys: CarPlaySessionKeys,
+        navigation: Boolean,
     ): CarPlayMediaAudio? {
         val formats = info.objectForKey("audioFormats") as? NSArray ?: return null
+        val audioType = if (navigation) "alert" else "media"
         val media = formats.array.filterIsInstance<NSDictionary>().filter {
-            (it.objectForKey("audioType") as? NSString)?.content == "media"
+            (it.objectForKey("audioType") as? NSString)?.content == audioType
         }
         fun mask(type: Int): Int = media.firstOrNull {
             (it.objectForKey("type") as? NSNumber)?.intValue() == type
         }?.let { (it.objectForKey("audioOutputFormats") as? NSNumber)?.intValue() } ?: 0
         val aacMask = mask(CarPlayMediaAudio.AAC_TYPE)
         val pcmMask = mask(CarPlayMediaAudio.PCM_TYPE)
-        val (format, rate) = when {
+        val (format, rate) = if (navigation) when {
+            pcmMask and 0x4000 != 0 -> 0x4000 to 48_000
+            pcmMask and 0x400 != 0 -> 0x400 to 44_100
+            pcmMask and 0x10 != 0 -> 0x10 to 16_000
+            else -> return null
+        } else when {
             aacMask and 0x800000 != 0 -> 0x800000 to 48_000
             aacMask and 0x400000 != 0 -> 0x400000 to 44_100
             pcmMask and 0x800 != 0 -> 0x800 to 44_100
@@ -112,20 +122,29 @@ internal object CarPlayScreenProbe {
         val id = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
         val stream = NSDictionary().apply {
             put("type", type)
-            put("audioType", "media")
+            put("audioType", audioType)
             put("audioFormat", format)
-            put("audioLatencyMs", if (aac) 350 else 120)
+            put("audioLatencyMs", if (navigation) 100 else if (aac) 350 else 120)
             put("streamConnectionID", id)
         }
         val body = NSDictionary().apply {
             put("streams", NSArray(1).apply { setValue(0, stream) })
         }
-        val reply = parse(request(control, "SETUP", "/", body))
+        val reply = try {
+            parse(request(control, "SETUP", "/", body))
+        } catch (failure: ProtocolException) {
+            if (!navigation) throw failure
+            android.util.Log.w("CarNatAudio", "Receiver did not negotiate navigation audio", failure)
+            return null
+        }
         val streams = reply.objectForKey("streams") as? NSArray
         val response = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
-            (it.objectForKey("type") as? NSNumber)?.intValue() == type
+            (it.objectForKey("type") as? NSNumber)?.intValue() == type &&
+                (it.objectForKey("streamConnectionID") as? NSNumber)?.longValue()?.let { it == id } != false
         } ?: return null
-        return CarPlayMediaAudio(host, port(response, "dataPort"), keys.video(id), rate, aac)
+        return CarPlayMediaAudio(host, port(response, "dataPort"), keys.video(id), rate, aac,
+            stream = if (navigation) 2 else 1, outputChannels = if (navigation) 1 else 2,
+        )
     }
 
     private fun sendVideo(

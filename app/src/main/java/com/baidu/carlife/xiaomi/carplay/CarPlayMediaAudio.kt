@@ -19,7 +19,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Sends the native CarLife callback's PCM as authenticated CarPlay RTP. */
-internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, private val rate: Int, private val aac: Boolean) : Closeable {
+internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, private val rate: Int, private val aac: Boolean, private val stream: Int, private val outputChannels: Int) : Closeable {
     private val socket = DatagramSocket().apply { connect(InetSocketAddress(host, port)) }
     private val secret = SecretKeySpec(key, "ChaCha20")
     private val queue = ArrayBlockingQueue<Chunk>(16)
@@ -27,12 +27,12 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
     private var encoderInputMisses = 0L
     private var nextPacketAt = 0L
     private var lastReportAt = 0L
-    private val packetInterval = (if (aac) 1024L else 240L) * 1_000_000_000 / rate
+    private val packetInterval = (if (aac) 1024L else (rate / 200).toLong()) * 1_000_000_000 / rate
     private var sequence = 0L
     private var samples = 0
     private var remainder = 0
     private var sourceRate = 0
-    private val payload = ByteBuffer.allocate((if (aac) 1024 else 240) * 4)
+    private val payload = ByteBuffer.allocate((if (aac) 1024 else rate / 200) * outputChannels * 2)
         .order(if (aac) ByteOrder.LITTLE_ENDIAN else ByteOrder.BIG_ENDIAN)
     private val sender = Thread({
         try {
@@ -57,8 +57,8 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
 
     fun start() {
         synchronized(Companion) {
-            check(active == null)
-            active = this
+            check(active[stream] == null)
+            active[stream] = this
         }
         sender.start()
     }
@@ -75,7 +75,8 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
             remainder += rate
             while (remainder >= sourceRate) {
                 remainder -= sourceRate
-                payload.putShort(left).putShort(right)
+                if (outputChannels == 1) payload.putShort(((left.toInt() + right.toInt()) / 2).toShort())
+                else payload.putShort(left).putShort(right)
                 if (!payload.hasRemaining()) {
                     if (encoder == null) sendPacket(payload.array()) else encode(encoder)
                     payload.clear()
@@ -144,18 +145,18 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
         socket.send(DatagramPacket(packet, packet.size))
         val sentAt = System.nanoTime()
         if (sequence == 0L || sentAt - lastReportAt >= 5_000_000_000L) {
-            Log.i(TAG, "Audio packets=${sequence + 1} queue=${queue.size} droppedChunks=${droppedChunks.get()} encoderInputMisses=$encoderInputMisses")
+            Log.i(TAG, "Audio stream=$stream packets=${sequence + 1} queue=${queue.size} droppedChunks=${droppedChunks.get()} encoderInputMisses=$encoderInputMisses")
             lastReportAt = sentAt
         }
         if (sequence == 0L) Log.i(TAG, "Sent first CarWith audio packet, AAC=$aac rate=$rate")
         sequence++
-        samples += payload.capacity() / 4
+        samples += payload.capacity() / (outputChannels * 2)
     }
 
     private val cipher = Cipher.getInstance("ChaCha20-Poly1305")
 
     override fun close() {
-        synchronized(Companion) { if (active === this) active = null }
+        synchronized(Companion) { active.remove(stream, this) }
         socket.close()
         sender.interrupt()
     }
@@ -166,10 +167,10 @@ internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, privat
         const val PCM_TYPE = 100
         const val AAC_TYPE = 102
         private const val TAG = "CarNatAudio"
-        @Volatile private var active: CarPlayMediaAudio? = null
+        private val active = java.util.concurrent.ConcurrentHashMap<Int, CarPlayMediaAudio>()
 
-        fun offer(data: ByteArray?, rate: Int, channels: Int, format: Int) {
-            val stream = active ?: return
+        fun offer(data: ByteArray?, sourceStream: Int, rate: Int, channels: Int, format: Int) {
+            val stream = active[sourceStream] ?: return
             if (data == null || data.size !in 1..65_536 || rate !in 8_000..96_000 || channels !in 1..2) return
             val pcm = when (format) {
                 AudioFormat.ENCODING_PCM_16BIT -> data
