@@ -81,7 +81,7 @@ class CarlifeConnectService : Service() {
         receiverJob = projectionScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    probe.run(adapter, settings.name, settings.pin, settings.address, { timeout.cancel() }) { stage ->
+                    probe.run(adapter, settings.name, settings.networkPairingCode, settings.address, { timeout.cancel() }) { stage ->
                         Log.i("CarNatIap2", stage)
                         projectionScope.launch {
                             if (receiverProbe === probe) mutableState.update { it.copy(receiverStatus = stage) }

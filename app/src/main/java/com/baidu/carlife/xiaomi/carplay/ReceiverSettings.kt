@@ -4,7 +4,9 @@ import android.content.Context
 
 internal data class ReceiverSettings(val name: String = "", val address: String = "", val pin: String = "") {
     val valid: Boolean get() = name.isNotBlank() && CarPlayScreenProbe.bluetoothAddress.matches(address.trim()) &&
-        pin.length <= 16 && pin.count { it in '0'..'9' } >= 4 && pin.all { it in '0'..'9' || it == '-' }
+        (pin.isEmpty() || pin.length <= 16 && pin.count { it in '0'..'9' } >= 4 && pin.all { it in '0'..'9' || it == '-' })
+
+    val networkPairingCode: String get() = pin.ifEmpty { "3939" }
 
     fun save(context: Context): Boolean = preferences(context).edit()
         .putString("name", name.trim()).putString("address", address.trim()).putString("pin", pin).commit()
@@ -14,7 +16,7 @@ internal data class ReceiverSettings(val name: String = "", val address: String 
 
         fun load(context: Context): ReceiverSettings = preferences(context).let {
             ReceiverSettings(it.getString("name", "").orEmpty(), it.getString("address", "").orEmpty(),
-                it.getString("pin", "").orEmpty())
+                it.getString("pin", "").orEmpty().takeUnless { code -> code == "3939" }.orEmpty())
         }
     }
 }
