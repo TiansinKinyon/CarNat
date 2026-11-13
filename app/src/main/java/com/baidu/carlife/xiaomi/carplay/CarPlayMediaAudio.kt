@@ -1,6 +1,9 @@
 package com.baidu.carlife.xiaomi.carplay
 
 import android.media.AudioFormat
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
 import android.util.Log
 import java.io.Closeable
 import java.net.DatagramPacket
@@ -13,8 +16,8 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-/** Sends the native CarLife callback's PCM16 as authenticated CarPlay RTP. */
-internal class CarPlayPcmAudio(host: String, port: Int, key: ByteArray, private val rate: Int) : Closeable {
+/** Sends the native CarLife callback's PCM as authenticated CarPlay RTP. */
+internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, private val rate: Int, private val aac: Boolean) : Closeable {
     private val socket = DatagramSocket().apply { connect(InetSocketAddress(host, port)) }
     private val secret = SecretKeySpec(key, "ChaCha20")
     private val queue = ArrayBlockingQueue<Chunk>(16)
@@ -22,10 +25,22 @@ internal class CarPlayPcmAudio(host: String, port: Int, key: ByteArray, private 
     private var samples = 0
     private var remainder = 0
     private var sourceRate = 0
-    private val payload = ByteBuffer.allocate(240 * 4)
+    private val payload = ByteBuffer.allocate((if (aac) 1024 else 240) * 4)
+        .order(if (aac) ByteOrder.LITTLE_ENDIAN else ByteOrder.BIG_ENDIAN)
     private val sender = Thread({
         try {
-            while (!socket.isClosed) send(queue.take())
+            if (aac) {
+                MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).useCodec { encoder ->
+                    val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, 2)
+                    format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                    format.setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
+                    encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    encoder.start()
+                    while (!socket.isClosed) send(queue.take(), encoder)
+                }
+            } else {
+                while (!socket.isClosed) send(queue.take(), null)
+            }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         } catch (failure: Exception) {
@@ -41,7 +56,7 @@ internal class CarPlayPcmAudio(host: String, port: Int, key: ByteArray, private 
         sender.start()
     }
 
-    private fun send(chunk: Chunk) {
+    private fun send(chunk: Chunk, encoder: MediaCodec?) {
         if (sourceRate != chunk.rate) {
             sourceRate = chunk.rate
             remainder = 0
@@ -55,23 +70,59 @@ internal class CarPlayPcmAudio(host: String, port: Int, key: ByteArray, private 
                 remainder -= sourceRate
                 payload.putShort(left).putShort(right)
                 if (!payload.hasRemaining()) {
-                    sendPacket()
+                    if (encoder == null) sendPacket(payload.array()) else encode(encoder)
                     payload.clear()
                 }
             }
         }
     }
 
-    private fun sendPacket() {
+    private var inputSamples = 0L
+    private val outputInfo = MediaCodec.BufferInfo()
+
+    private fun encode(encoder: MediaCodec) {
+        val index = encoder.dequeueInputBuffer(20_000)
+        if (index >= 0) {
+            checkNotNull(encoder.getInputBuffer(index)).put(payload.array())
+            encoder.queueInputBuffer(index, 0, payload.capacity(), inputSamples * 1_000_000 / rate, 0)
+            inputSamples += 1024
+        }
+        while (true) {
+            val output = encoder.dequeueOutputBuffer(outputInfo, 0)
+            if (output == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue
+            if (output < 0) return
+            try {
+                if (outputInfo.size > 0 && outputInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                    val buffer = checkNotNull(encoder.getOutputBuffer(output))
+                    buffer.position(outputInfo.offset)
+                    buffer.limit(outputInfo.offset + outputInfo.size)
+                    sendPacket(ByteArray(outputInfo.size).also { buffer.get(it) })
+                }
+            } finally {
+                encoder.releaseOutputBuffer(output, false)
+            }
+        }
+    }
+
+    private inline fun MediaCodec.useCodec(block: (MediaCodec) -> Unit) {
+        try {
+            block(this)
+        } finally {
+            release()
+        }
+    }
+
+    private fun sendPacket(audio: ByteArray) {
+        val type = if (aac) AAC_TYPE else PCM_TYPE
         val header = ByteBuffer.allocate(12).put(0x80.toByte())
-            .put((if (sequence == 0L) 0x80 or TYPE else TYPE).toByte())
+            .put((if (sequence == 0L) 0x80 or type else type).toByte())
             .putShort(sequence.toShort()).putInt(samples).putInt(0).array()
         val nonce = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).putLong(4, sequence).array()
         cipher.init(Cipher.ENCRYPT_MODE, secret, IvParameterSpec(nonce))
         cipher.updateAAD(header, 4, 8)
-        val packet = header + cipher.doFinal(payload.array()) + nonce.copyOfRange(4, 12)
+        val packet = header + cipher.doFinal(audio) + nonce.copyOfRange(4, 12)
         socket.send(DatagramPacket(packet, packet.size))
-        if (sequence == 0L) Log.i(TAG, "Sent first CarWith PCM packet at $rate Hz")
+        if (sequence == 0L) Log.i(TAG, "Sent first CarWith audio packet, AAC=$aac rate=$rate")
         sequence++
         samples += payload.capacity() / 4
     }
@@ -87,9 +138,10 @@ internal class CarPlayPcmAudio(host: String, port: Int, key: ByteArray, private 
     private data class Chunk(val bytes: ByteArray, val rate: Int, val channels: Int)
 
     companion object {
-        const val TYPE = 100
+        const val PCM_TYPE = 100
+        const val AAC_TYPE = 102
         private const val TAG = "CarNatAudio"
-        @Volatile private var active: CarPlayPcmAudio? = null
+        @Volatile private var active: CarPlayMediaAudio? = null
 
         fun offer(data: ByteArray?, rate: Int, channels: Int, format: Int) {
             val stream = active ?: return

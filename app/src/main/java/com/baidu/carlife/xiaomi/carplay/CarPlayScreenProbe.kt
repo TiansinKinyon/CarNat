@@ -90,24 +90,31 @@ internal object CarPlayScreenProbe {
 
     private fun openAudio(
         info: NSDictionary, host: String, control: RtspControl, keys: CarPlaySessionKeys,
-    ): CarPlayPcmAudio? {
+    ): CarPlayMediaAudio? {
         val formats = info.objectForKey("audioFormats") as? NSArray ?: return null
-        val media = formats.array.filterIsInstance<NSDictionary>().firstOrNull {
-            (it.objectForKey("type") as? NSNumber)?.intValue() == CarPlayPcmAudio.TYPE &&
-                (it.objectForKey("audioType") as? NSString)?.content == "media"
-        } ?: return null
-        val mask = (media.objectForKey("audioOutputFormats") as? NSNumber)?.intValue() ?: return null
+        val media = formats.array.filterIsInstance<NSDictionary>().filter {
+            (it.objectForKey("audioType") as? NSString)?.content == "media"
+        }
+        fun mask(type: Int): Int = media.firstOrNull {
+            (it.objectForKey("type") as? NSNumber)?.intValue() == type
+        }?.let { (it.objectForKey("audioOutputFormats") as? NSNumber)?.intValue() } ?: 0
+        val aacMask = mask(CarPlayMediaAudio.AAC_TYPE)
+        val pcmMask = mask(CarPlayMediaAudio.PCM_TYPE)
         val (format, rate) = when {
-            mask and 0x800 != 0 -> 0x800 to 44_100
-            mask and 0x8000 != 0 -> 0x8000 to 48_000
+            aacMask and 0x800000 != 0 -> 0x800000 to 48_000
+            aacMask and 0x400000 != 0 -> 0x400000 to 44_100
+            pcmMask and 0x800 != 0 -> 0x800 to 44_100
+            pcmMask and 0x8000 != 0 -> 0x8000 to 48_000
             else -> return null
         }
+        val aac = format >= 0x400000
+        val type = if (aac) CarPlayMediaAudio.AAC_TYPE else CarPlayMediaAudio.PCM_TYPE
         val id = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
         val stream = NSDictionary().apply {
-            put("type", CarPlayPcmAudio.TYPE)
+            put("type", type)
             put("audioType", "media")
             put("audioFormat", format)
-            put("audioLatencyMs", 120)
+            put("audioLatencyMs", if (aac) 1000 else 120)
             put("streamConnectionID", id)
         }
         val body = NSDictionary().apply {
@@ -116,9 +123,9 @@ internal object CarPlayScreenProbe {
         val reply = parse(request(control, "SETUP", "/", body))
         val streams = reply.objectForKey("streams") as? NSArray
         val response = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
-            (it.objectForKey("type") as? NSNumber)?.intValue() == CarPlayPcmAudio.TYPE
+            (it.objectForKey("type") as? NSNumber)?.intValue() == type
         } ?: return null
-        return CarPlayPcmAudio(host, port(response, "dataPort"), keys.video(id), rate)
+        return CarPlayMediaAudio(host, port(response, "dataPort"), keys.video(id), rate, aac)
     }
 
     private fun sendVideo(
