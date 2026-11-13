@@ -114,7 +114,7 @@ internal object CarPlayScreenProbe {
             put("type", type)
             put("audioType", "media")
             put("audioFormat", format)
-            put("audioLatencyMs", if (aac) 1000 else 120)
+            put("audioLatencyMs", if (aac) 350 else 120)
             put("streamConnectionID", id)
         }
         val body = NSDictionary().apply {
