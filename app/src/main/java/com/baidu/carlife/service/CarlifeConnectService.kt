@@ -23,6 +23,7 @@ import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import com.baidu.carlife.mixing.CastConfig
@@ -190,36 +191,87 @@ class CarlifeConnectService : Service() {
         }
         private var touchListener: IRemoteTouchListener? = null
         private var touchDownTime: Long? = null
-        private val touchSink: (Float, Float, Boolean, Boolean) -> Unit = { x, y, down, cancel ->
-            worker.post { sendTouch(x, y, down, cancel) }
+        private var keyListener: IRemoteKeyListener? = null
+        private val contacts = mutableListOf<RemoteContact>()
+        private val touchSink: (List<RemoteContact>, Boolean) -> Unit = { report, cancel ->
+            worker.post { sendTouch(report, cancel) }
+        }
+        private val keySink: (Int) -> Unit = { code ->
+            worker.post {
+                val listener = keyListener
+                if (!closed && listener != null) {
+                    val now = SystemClock.uptimeMillis()
+                    try {
+                        val accepted = listener.onKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0))
+                        listener.onKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0))
+                        Log.d(TAG, "CarWith key code=$code accepted=$accepted")
+                    } catch (error: RemoteException) {
+                        Log.w(TAG, "CarWith key listener disconnected", error)
+                    }
+                }
+            }
         }
 
-        private fun sendTouch(x: Float, y: Float, down: Boolean, cancel: Boolean) {
+        private fun sendTouch(report: List<RemoteContact>, cancel: Boolean) {
             val listener = touchListener ?: return
             if (closed || mutableState.value.displayId == null) return
             val now = SystemClock.uptimeMillis()
-            val prior = touchDownTime
-            val action = when {
-                down && prior == null -> MotionEvent.ACTION_DOWN
-                down -> MotionEvent.ACTION_MOVE
-                prior == null -> return
-                cancel -> MotionEvent.ACTION_CANCEL
-                else -> MotionEvent.ACTION_UP
+            fun dispatch(action: Int) {
+                val properties = contacts.map {
+                    MotionEvent.PointerProperties().apply { id = it.id; toolType = MotionEvent.TOOL_TYPE_FINGER }
+                }.toTypedArray()
+                val coordinates = contacts.map {
+                    MotionEvent.PointerCoords().apply {
+                        x = it.x * (WIDTH - 1)
+                        y = it.y * (HEIGHT - 1)
+                        pressure = 1f
+                        size = 1f
+                    }
+                }.toTypedArray()
+                val event = MotionEvent.obtain(touchDownTime ?: now, now, action, contacts.size,
+                    properties, coordinates, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+                try {
+                    val accepted = listener.onTouchEvent(event)
+                    if (action != MotionEvent.ACTION_MOVE) Log.d(TAG, "CarWith touch action=$action pointers=${contacts.size} accepted=$accepted")
+                } finally {
+                    event.recycle()
+                }
             }
-            val start = prior ?: now
-            touchDownTime = if (down) start else null
-            val event = MotionEvent.obtain(start, now, action, x * (WIDTH - 1), y * (HEIGHT - 1), 0)
-            event.source = InputDevice.SOURCE_TOUCHSCREEN
             try {
-                val accepted = listener.onTouchEvent(event)
-                if (action != MotionEvent.ACTION_MOVE) Log.d(TAG, "CarWith touch action=$action accepted=$accepted")
+                if (cancel) {
+                    if (contacts.isNotEmpty()) dispatch(MotionEvent.ACTION_CANCEL)
+                    contacts.clear()
+                    touchDownTime = null
+                    return
+                }
+                var changed = false
+                for (index in contacts.indices.reversed()) {
+                    val update = report.firstOrNull { it.id == contacts[index].id }
+                    if (update != null) contacts[index] = update
+                    if (update?.down != true) {
+                        dispatch(if (contacts.size == 1) MotionEvent.ACTION_UP else
+                            MotionEvent.ACTION_POINTER_UP or (index shl MotionEvent.ACTION_POINTER_INDEX_SHIFT))
+                        contacts.removeAt(index)
+                        changed = true
+                    }
+                }
+                for (contact in report) {
+                    if (!contact.down || contacts.any { it.id == contact.id }) continue
+                    contacts.add(contact)
+                    if (contacts.size == 1) touchDownTime = now
+                    dispatch(if (contacts.size == 1) MotionEvent.ACTION_DOWN else
+                        MotionEvent.ACTION_POINTER_DOWN or (contacts.lastIndex shl MotionEvent.ACTION_POINTER_INDEX_SHIFT))
+                    changed = true
+                }
+                if (contacts.isEmpty()) touchDownTime = null
+                else if (!changed) dispatch(MotionEvent.ACTION_MOVE)
             } catch (error: RemoteException) {
+                contacts.clear()
                 touchDownTime = null
                 Log.w(TAG, "CarWith touch listener disconnected", error)
-            } finally {
-                event.recycle()
             }
         }
+
         private val timeout = Runnable {
             val message = when {
                 manager == null -> "Timed out binding the CarWith cast service"
@@ -267,13 +319,30 @@ class CarlifeConnectService : Service() {
                 worker.post {
                     if (listener?.asBinder() == touchListener?.asBinder()) {
                         touchListener = null
+                        contacts.clear()
                         touchDownTime = null
                         if (remoteTouchSink === touchSink) remoteTouchSink = null
                     }
                 }
             }
-            override fun addKeyListener(listener: IRemoteKeyListener?) = Unit
-            override fun removeKeyListener(listener: IRemoteKeyListener?) = Unit
+            override fun addKeyListener(listener: IRemoteKeyListener?) {
+                if (listener == null) return
+                worker.post {
+                    if (!closed) {
+                        keyListener = listener
+                        remoteKeySink = keySink
+                    }
+                }
+            }
+
+            override fun removeKeyListener(listener: IRemoteKeyListener?) {
+                worker.post {
+                    if (listener?.asBinder() == keyListener?.asBinder()) {
+                        keyListener = null
+                        if (remoteKeySink === keySink) remoteKeySink = null
+                    }
+                }
+            }
             override fun sendMusicInfo(info: MusicInfo?) = Unit
             override fun notifyMusicProgress(positionMs: Long) = Unit
             override fun invokeMethod(intent: Intent?): Bundle = Bundle().apply {
@@ -430,6 +499,8 @@ class CarlifeConnectService : Service() {
             if (remoteTouchSink === touchSink) remoteTouchSink = null
             if (keyFrameSink === requestSyncFrame) keyFrameSink = null
             touchListener = null
+            if (remoteKeySink === keySink) remoteKeySink = null
+            keyListener = null
             worker.removeCallbacks(timeout)
             try {
                 manager?.stopCast()
@@ -469,7 +540,7 @@ class CarlifeConnectService : Service() {
         val state = mutableState.asStateFlow()
 
         @Volatile
-        private var remoteTouchSink: ((Float, Float, Boolean, Boolean) -> Unit)? = null
+        private var remoteTouchSink: ((List<RemoteContact>, Boolean) -> Unit)? = null
 
         @Volatile
         private var keyFrameSink: (() -> Unit)? = null
@@ -478,8 +549,15 @@ class CarlifeConnectService : Service() {
             keyFrameSink?.invoke()
         }
 
-        internal fun remoteTouch(x: Float, y: Float, down: Boolean, cancel: Boolean = false) {
-            remoteTouchSink?.invoke(x, y, down, cancel)
+        @Volatile
+        private var remoteKeySink: ((Int) -> Unit)? = null
+
+        internal fun remoteKey(code: Int) {
+            remoteKeySink?.invoke(code)
+        }
+
+        internal fun remoteTouch(contacts: List<RemoteContact>, cancel: Boolean = false) {
+            remoteTouchSink?.invoke(contacts, cancel)
         }
 
         fun startDiagnostic(context: Context) {
@@ -522,6 +600,8 @@ class CarlifeConnectService : Service() {
         }
     }
 }
+
+internal data class RemoteContact(val id: Int, val x: Float, val y: Float, val down: Boolean)
 
 enum class CapturePhase(val isActive: Boolean = false) {
     IDLE, ARMED(true), BINDING(true), WAITING_FOR_FRAMES(true), RECEIVING(true), STOPPED, FAILED

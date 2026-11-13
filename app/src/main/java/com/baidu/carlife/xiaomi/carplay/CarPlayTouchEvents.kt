@@ -1,7 +1,9 @@
 package com.baidu.carlife.xiaomi.carplay
 
 import android.util.Log
+import android.view.KeyEvent
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.service.RemoteContact
 import com.dd.plist.BinaryPropertyListParser
 import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSData
@@ -27,9 +29,8 @@ internal class CarPlayTouchEvents(
     private val onClosed: () -> Unit,
     private val onStage: (String) -> Unit,
 ) {
-    private var pointer: Int? = null
-    private var x = 0f
-    private var y = 0f
+    private var contacts = emptyList<RemoteContact>()
+    private var knobButtons = 0
 
     fun start() {
         Thread({
@@ -39,7 +40,7 @@ internal class CarPlayTouchEvents(
             } catch (error: Exception) {
                 if (!socket.isClosed) Log.w("CarNatTouch", "Event channel ended", error)
             } finally {
-                if (pointer != null) CarlifeConnectService.remoteTouch(x, y, down = false, cancel = true)
+                if (contacts.any { it.down }) CarlifeConnectService.remoteTouch(emptyList(), cancel = true)
                 onClosed()
             }
         }, "CarPlay events").apply { isDaemon = true }.start()
@@ -105,6 +106,8 @@ internal class CarPlayTouchEvents(
                 val uuid = (command?.objectForKey("uuid") as? NSString)?.content
                 if (type == "hidSendReport" && uuid.equals("2a2a2a2a", ignoreCase = true) && width > 0 && height > 0) {
                     (command?.objectForKey("hidReport") as? NSData)?.bytes()?.let(::touch)
+                } else if (type == "hidSendReport" && uuid.equals("2a2a2a2b", ignoreCase = true)) {
+                    (command?.objectForKey("hidReport") as? NSData)?.bytes()?.let(::knob)
                 } else if (type == "forceKeyFrame") {
                     CarlifeConnectService.requestKeyFrame()
                 } else if (type == "iAPSendMessage") {
@@ -122,15 +125,36 @@ internal class CarPlayTouchEvents(
 
     private fun touch(report: ByteArray) {
         if (report.size != 12 || report[0] != 0.toByte() || report[6] != 1.toByte()) return
-        val offset = pointer ?: listOf(0, 6).firstOrNull { report[it + 1].toInt() and 1 != 0 } ?: return
-        val down = report[offset + 1].toInt() and 1 != 0
-        fun coordinate(index: Int): Int = (report[index].toInt() and 255) or ((report[index + 1].toInt() and 255) shl 8)
-        if (down || coordinate(offset + 2) != 0 || coordinate(offset + 4) != 0) {
-            x = (coordinate(offset + 2).toFloat() / width).coerceIn(0f, 1f)
-            y = (coordinate(offset + 4).toFloat() / height).coerceIn(0f, 1f)
+        fun coordinate(index: Int) = (report[index].toInt() and 255) or ((report[index + 1].toInt() and 255) shl 8)
+        contacts = listOf(0, 6).mapNotNull { offset ->
+            val id = offset / 6
+            val down = report[offset + 1].toInt() and 1 != 0
+            val previous = contacts.firstOrNull { it.id == id && it.down }
+            if (!down && previous == null) return@mapNotNull null
+            val x = coordinate(offset + 2)
+            val y = coordinate(offset + 4)
+            if (!down && x == 0 && y == 0 && previous != null) previous.copy(down = false)
+            else RemoteContact(id, (x.toFloat() / width).coerceIn(0f, 1f),
+                (y.toFloat() / height).coerceIn(0f, 1f), down)
         }
-        pointer = if (down) offset else null
-        CarlifeConnectService.remoteTouch(x, y, down)
+        CarlifeConnectService.remoteTouch(contacts)
+    }
+
+    private fun knob(report: ByteArray) {
+        if (report.size != 4) return
+        val buttons = report[0].toInt() and 7
+        val pressed = buttons and knobButtons.inv()
+        knobButtons = buttons
+        if (pressed and 1 != 0) CarlifeConnectService.remoteKey(KeyEvent.KEYCODE_DPAD_CENTER)
+        if (pressed and 4 != 0) CarlifeConnectService.remoteKey(KeyEvent.KEYCODE_BACK)
+        val x = report[1].toInt()
+        val y = report[2].toInt()
+        val wheel = report[3].toInt()
+        if (x != 0) CarlifeConnectService.remoteKey(if (x < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
+        if (y != 0) CarlifeConnectService.remoteKey(if (y < 0) KeyEvent.KEYCODE_DPAD_UP else KeyEvent.KEYCODE_DPAD_DOWN)
+        repeat(kotlin.math.abs(wheel).coerceAtMost(8)) {
+            CarlifeConnectService.remoteKey(if (wheel < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
+        }
     }
 
     private fun line(input: DataInputStream): String? {
