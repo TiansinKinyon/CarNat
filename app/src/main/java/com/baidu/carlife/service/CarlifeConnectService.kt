@@ -232,7 +232,9 @@ class CarlifeConnectService : Service() {
         private val audioCallback = object : ISystemAudioCallback.Stub() {
             override fun onAudioStreamReady(data: ByteArray?, offset: Int, length: Int, sampleRate: Int, channels: Int) =
                 CarPlayPcmAudio.offer(data, offset, length, sampleRate, channels)
-            override fun onAudioStateChange(stream: Int, state: Int) = Unit
+            override fun onAudioStateChange(stream: Int, state: Int) {
+                Log.d(TAG, "CarWith audio stream=$stream state=$state")
+            }
             override fun onAudioStateChangeWithParams(stream: Int, state: Int, sampleRate: Int, channels: Int, format: Int) = Unit
         }
 
@@ -274,7 +276,12 @@ class CarlifeConnectService : Service() {
             override fun removeKeyListener(listener: IRemoteKeyListener?) = Unit
             override fun sendMusicInfo(info: MusicInfo?) = Unit
             override fun notifyMusicProgress(positionMs: Long) = Unit
-            override fun invokeMethod(intent: Intent?): Bundle = Bundle()
+            override fun invokeMethod(intent: Intent?): Bundle = Bundle().apply {
+                if (intent?.action == "carlife_music_sample_rate") {
+                    putInt("music_sample_rate", 44_100)
+                    Log.i(TAG, "Reported CarWith music sample rate: 44100 Hz")
+                }
+            }
             override fun notifyAudioState(state: Int) = Unit
             override fun addAudioListener(listener: IRemoteAudioListener?) = Unit
             override fun removeAudioListener(listener: IRemoteAudioListener?) = Unit
