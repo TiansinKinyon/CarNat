@@ -19,7 +19,7 @@ class Iap2LinkProbeTest {
         val identity = byteArrayOf(0x40, 0x40, 0, 18, 0x1d, 1, 0, 12, 0, 0) +
             "WinPlay".toByteArray() + byteArrayOf(0)
         val input = marker + marker + packet(0x80, 255, 0, 0, parameters) +
-            packet(0x40, 255, 99, 0, byteArrayOf()) +
+            packet(0x40, 255, 100, 0, byteArrayOf()) +
             packet(0x40, 0, 100, 10, identity.copyOfRange(0, 8)) +
             packet(0x40, 1, 100, 10, identity.copyOfRange(8, identity.size))
         val output = ByteArrayOutputStream()
@@ -30,15 +30,30 @@ class Iap2LinkProbeTest {
         }
 
         assertArrayEquals(
-            marker + packet(0xc0, 99, 255, 0, parameters) +
-                packet(0x40, 100, 255, 10, request) +
-                packet(0x40, 100, 0, 0, byteArrayOf()) + packet(0x40, 100, 1, 0, byteArrayOf()) +
-                packet(0x40, 101, 1, 10, byteArrayOf(0x40, 0x40, 0, 6, 0x1d, 2)) +
-                packet(0x40, 102, 1, 10, byteArrayOf(0x40, 0x40, 0, 6, 0xaa.toByte(), 0)),
+            marker + packet(0xc0, 100, 255, 0, parameters) +
+                packet(0x40, 101, 255, 10, request) +
+                packet(0x40, 101, 0, 0, byteArrayOf()) + packet(0x40, 101, 1, 0, byteArrayOf()) +
+                packet(0x40, 102, 1, 10, byteArrayOf(0x40, 0x40, 0, 6, 0x1d, 2)) +
+                packet(0x40, 103, 1, 10, byteArrayOf(0x40, 0x40, 0, 6, 0xaa.toByte(), 0)),
             output.toByteArray(),
         )
         assertEquals(4, stages.size)
         assertEquals("已收到 iAP2 接收端身份：WinPlay", stages.last())
+    }
+
+    @Test
+    fun repeatsTheSameSyncReplyButAdvancesForANewRequest() {
+        val parameters = byteArrayOf(1, 4, 0x10, 0, 1, 0, 0, 0, 4, 1, 10, 0, 1)
+        val first = packet(0x80, 161, 0, 0, parameters)
+        val next = packet(0x80, 191, 0, 0, parameters)
+        val output = ByteArrayOutputStream()
+
+        assertThrows(EOFException::class.java) {
+            Iap2LinkProbe.run(ByteArrayInputStream(first + first + next), output) {}
+        }
+
+        val firstReply = packet(0xc0, 100, 161, 0, parameters)
+        assertArrayEquals(firstReply + firstReply + packet(0xc0, 101, 191, 0, parameters), output.toByteArray())
     }
 
     @Test

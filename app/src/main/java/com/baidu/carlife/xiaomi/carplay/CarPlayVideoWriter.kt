@@ -58,6 +58,11 @@ internal class CarPlayVideoWriter(
         writePacket(header, cipher.doFinal(avccAccessUnit))
     }
 
+    fun writeKeepAlive() {
+        check(!failed) { "The video stream must be reopened after a write failure" }
+        writePacket(header(0, 2, 0).array(), byteArrayOf())
+    }
+
     private fun writePacket(header: ByteArray, payload: ByteArray) {
         // A partial write cannot be retried on this stream.
         failed = true

@@ -32,6 +32,8 @@ internal object Iap2LinkProbe {
         var identificationSent = false
         var peerSequence = 0
         var localSequence = 99
+        var lastSyncRequest: ByteArray? = null
+        var lastSyncReply: ByteArray? = null
         var controlSession = 0
         val controlData = ByteArrayOutputStream()
         var awaitingCertificate = false
@@ -94,7 +96,13 @@ internal object Iap2LinkProbe {
                         controlSession = controlSession(parameters)
                         peerSequence = sequence
                         val reply = if (flags and 0x40 == 0) {
-                            frame(0xc0, localSequence, peerSequence, parameters)
+                            if (lastSyncRequest?.contentEquals(packet) == true) {
+                                checkNotNull(lastSyncReply)
+                            } else {
+                                localSequence = (localSequence + 1) and 255
+                                lastSyncRequest = packet
+                                frame(0xc0, localSequence, peerSequence, parameters).also { lastSyncReply = it }
+                            }
                         } else {
                             frame(0x40, localSequence, peerSequence)
                         }

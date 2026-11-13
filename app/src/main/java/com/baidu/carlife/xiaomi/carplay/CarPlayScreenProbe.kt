@@ -184,6 +184,7 @@ internal object CarPlayScreenProbe {
             var frames = 0
             var sentBytes = 0L
             var longestWriteMs = 0L
+            var nextKeepAlive = SystemClock.elapsedRealtime() + 1_000
             var nextReport = SystemClock.elapsedRealtime() + 5_000
             var firstPtsUs = 0L
             var firstNtp = 0L
@@ -191,6 +192,10 @@ internal object CarPlayScreenProbe {
                 val now = SystemClock.elapsedRealtime()
                 if (frames == 0 && now >= firstFrameDeadline) {
                     throw ProtocolException("CarWith 未提供可发送的视频关键帧")
+                }
+                if (now >= nextKeepAlive) {
+                    writer.writeKeepAlive()
+                    nextKeepAlive = now + 1_000
                 }
                 if (now >= nextReport) {
                     val (encoded, dropped) = feed.counts()
