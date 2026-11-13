@@ -1,5 +1,6 @@
 package com.baidu.carlife.xiaomi.carplay
 
+import android.media.AudioFormat
 import android.util.Log
 import java.io.Closeable
 import java.net.DatagramPacket
@@ -90,12 +91,19 @@ internal class CarPlayPcmAudio(host: String, port: Int, key: ByteArray, private 
         private const val TAG = "CarNatAudio"
         @Volatile private var active: CarPlayPcmAudio? = null
 
-        fun offer(data: ByteArray?, offset: Int, length: Int, rate: Int, channels: Int) {
+        fun offer(data: ByteArray?, rate: Int, channels: Int, format: Int) {
             val stream = active ?: return
-            if (data == null || offset < 0 || length !in 1..65_536 || offset > data.size - length ||
-                rate !in 8_000..96_000 || channels !in 1..2 || length % (channels * 2) != 0
-            ) return
-            val chunk = Chunk(data.copyOfRange(offset, offset + length), rate, channels)
+            if (data == null || data.size !in 1..65_536 || rate !in 8_000..96_000 || channels !in 1..2) return
+            val pcm = when (format) {
+                AudioFormat.ENCODING_PCM_16BIT -> data
+                AudioFormat.ENCODING_PCM_8BIT -> ByteBuffer.allocate(data.size * 2)
+                    .order(ByteOrder.LITTLE_ENDIAN).apply {
+                        for (sample in data) putShort((((sample.toInt() and 255) - 128) shl 8).toShort())
+                    }.array()
+                else -> return
+            }
+            if (pcm.size % (channels * 2) != 0) return
+            val chunk = Chunk(pcm, rate, channels)
             if (!stream.queue.offer(chunk)) {
                 stream.queue.poll()
                 stream.queue.offer(chunk)
