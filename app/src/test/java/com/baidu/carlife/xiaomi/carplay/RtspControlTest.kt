@@ -48,6 +48,6 @@ class RtspControlTest {
         assertEquals(0, output.size())
         assertThrows(ProtocolException::class.java) { control.request("GET", "/info") }
         assertTrue(closed)
-        assertThrows(IllegalStateException::class.java) { control.request("GET", "/info") }
+        assertThrows(java.io.IOException::class.java) { control.request("GET", "/info") }
     }
 }

@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
+import android.os.SystemClock
 import com.baidu.carlife.service.CarlifeConnectService
 import java.io.Closeable
 import java.io.IOException
@@ -25,21 +26,27 @@ internal class BluetoothReceiverProbe : Closeable {
         onStage: (String) -> Unit,
     ) {
         try {
-            do {
+            var reconnectUntil = 0L
+            while (!closed) {
                 var streamed = false
                 try {
-                    runAttempt(adapter, receiverName, pin, deviceId, {
+                    val acceptTimeout = if (reconnectUntil == 0L) 30_000 else
+                        (reconnectUntil - SystemClock.elapsedRealtime()).coerceIn(1L, 30_000L).toInt()
+                    runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, {
                         streamed = true
                         onStreamStarted()
                     }, onStage)
                 } catch (error: IOException) {
                     if (closed) return
-                    if (!streamed || !captureReady()) throw error
+                    if (!captureReady() || (!streamed && SystemClock.elapsedRealtime() >= reconnectUntil)) throw error
                     onStage("投屏连接已断开 · 等待接收端重新连接")
                 } finally {
                     closeAttempt()
                 }
-            } while (!closed && streamed && captureReady())
+                if (!captureReady()) break
+                if (streamed) reconnectUntil = SystemClock.elapsedRealtime() + 90_000
+                if (SystemClock.elapsedRealtime() >= reconnectUntil) break
+            }
         } finally {
             close()
         }
@@ -51,6 +58,7 @@ internal class BluetoothReceiverProbe : Closeable {
         receiverName: String,
         pin: String,
         deviceId: String,
+        acceptTimeout: Int,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
     ) {
@@ -61,7 +69,7 @@ internal class BluetoothReceiverProbe : Closeable {
             adapter.listenUsingRfcommWithServiceRecord("CarPlay", SERVICE_UUID).also { server = it }
         }
         onStage("正在等待配对设备 $receiverName 连接")
-        val connection = listener.accept(30_000)
+        val connection = listener.accept(acceptTimeout)
         synchronized(this) {
             if (closed) {
                 connection.close()

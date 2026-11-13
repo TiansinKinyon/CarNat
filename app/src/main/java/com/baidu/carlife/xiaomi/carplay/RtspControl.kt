@@ -44,7 +44,7 @@ internal class RtspControl(
         headers: Map<String, String> = emptyMap(),
         body: ByteArray = byteArrayOf(),
     ): RtspResponse {
-        check(!closed) { "RTSP connection is closed" }
+        if (closed) throw IOException("RTSP connection is closed")
         require(TOKEN.matches(method) && target.isNotEmpty() && target.all { it in '!'..'~' })
         require(body.size <= MAX_BODY_BYTES)
         headers.forEach { (name, value) ->

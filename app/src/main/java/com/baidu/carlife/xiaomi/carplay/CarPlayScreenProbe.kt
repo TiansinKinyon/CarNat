@@ -85,7 +85,29 @@ internal object CarPlayScreenProbe {
                         val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
                         if (!CarlifeConnectService.state.value.active) return connected
                         onStage(connected)
+                        val heartbeat = Thread({
+                        try {
+                            while (!video.isClosed) {
+                                Thread.sleep(3_000)
+                                val reply = control.request("OPTIONS", "*")
+                                if (reply.status in 500..599) {
+                                    throw ProtocolException("CarPlay heartbeat returned ${reply.status}")
+                                }
+                            }
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                        } catch (failure: java.io.IOException) {
+                            if (!video.isClosed) {
+                                android.util.Log.i("CarNatIap2", "CarPlay 控制通道失联：${failure.message}")
+                                sockets.close()
+                            }
+                        }
+                    }, "CarPlay connection heartbeat").apply { isDaemon = true; start() }
+                    try {
                         return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                    } finally {
+                        heartbeat.interrupt()
+                    }
                     }
                 }
             }
