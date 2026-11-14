@@ -29,6 +29,7 @@ internal class BluetoothReceiverProbe(
         deviceId: String,
         onStreamStarted: () -> Unit,
         receiverAddress: String = "",
+        onResolution: (CarPlayResolution) -> Unit = {},
         onStage: (String) -> Unit,
     ) {
         try {
@@ -41,7 +42,7 @@ internal class BluetoothReceiverProbe(
                     runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, receiverAddress, {
                         streamed = true
                         onStreamStarted()
-                    }, onStage)
+                    }, onResolution, onStage)
                 } catch (error: IOException) {
                     if (closed) return
                     if (!captureReady() || (!streamed && SystemClock.elapsedRealtime() >= reconnectUntil)) throw error
@@ -67,6 +68,7 @@ internal class BluetoothReceiverProbe(
         acceptTimeout: Int,
         receiverAddress: String,
         onStreamStarted: () -> Unit,
+        onResolution: (CarPlayResolution) -> Unit,
         onStage: (String) -> Unit,
     ) {
         val attempt = CarPlaySockets()
@@ -114,7 +116,7 @@ internal class BluetoothReceiverProbe(
                 onStage("已连接车机 Wi-Fi")
             }
             onStage(CarPlayReceiverProbe.verify(
-                endpoint.host, endpoint.port, pin, endpoint.certificate, deviceId, attempt, onStreamStarted, onStage,
+                endpoint.host, endpoint.port, pin, endpoint.certificate, deviceId, attempt, onStreamStarted, onResolution, onStage,
             ))
         }
     }

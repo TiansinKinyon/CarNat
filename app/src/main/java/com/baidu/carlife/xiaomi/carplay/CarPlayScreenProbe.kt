@@ -21,7 +21,7 @@ import java.util.UUID
 internal object CarPlayScreenProbe {
     val bluetoothAddress = Regex("(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
     private val plistHeaders = mapOf("Content-Type" to "application/x-apple-binary-plist")
-    private const val MAIN_SCREEN = 110
+    private const val MAIN_SCREEN = CarPlayDisplay.MAIN_SCREEN
     private const val FIRST_FRAME_TIMEOUT_MS = 8_000L
 
     fun run(
@@ -33,17 +33,13 @@ internal object CarPlayScreenProbe {
         certificate: java.security.cert.X509Certificate,
         sockets: CarPlaySockets,
         onStreamStarted: () -> Unit,
+        onResolution: (CarPlayResolution) -> Unit,
         onStage: (String) -> Unit,
     ): String = CarPlayTiming(host, sockets.openDatagram()).use { timing ->
         require(bluetoothAddress.matches(deviceId))
         val receiverInfo = parse(info)
-        val displays = receiverInfo.objectForKey("displays") as? NSArray
-        val display = displays?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
-            it.objectForKey("uuid") is NSString
-        } ?: throw ProtocolException("接收端 /info 缺少显示屏 UUID")
-        val displayId = (display.objectForKey("uuid") as NSString).content
-        val touchWidth = (display.objectForKey("widthPixels") as? NSNumber)?.intValue() ?: 0
-        val touchHeight = (display.objectForKey("heightPixels") as? NSNumber)?.intValue() ?: 0
+        val display = CarPlayDisplay.fromReceiverInfo(receiverInfo)
+        val resolution = display.resolution
 
         onStage("正在建立 CarPlay 会话")
         val session = NSDictionary().apply {
@@ -59,13 +55,13 @@ internal object CarPlayScreenProbe {
         }
         val eventPort = port(parse(request(control, "SETUP", "/setup", session)), "eventPort")
         connect(sockets, host, eventPort).use { events ->
-            CarPlayTouchEvents(events, keys, control, touchWidth, touchHeight, certificate, sockets::close, onStage).start()
+            CarPlayTouchEvents(events, keys, control, resolution.width, resolution.height, certificate, sockets::close, onStage).start()
             onStage("事件通道已连接，正在协商主屏视频")
             val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
             val stream = NSDictionary().apply {
                 put("type", MAIN_SCREEN)
                 put("streamConnectionID", connectionId)
-                put("uuid", displayId)
+                put("uuid", display.uuid)
                 put("latencyMs", 25)
             }
             val request = NSDictionary().apply {
@@ -77,6 +73,7 @@ internal object CarPlayScreenProbe {
                 (it.objectForKey("type") as? NSNumber)?.longValue() == MAIN_SCREEN.toLong()
             } ?: throw ProtocolException("接收端未返回主屏流")
             val dataPort = port(screen, "dataPort")
+            onResolution(resolution)
             connect(sockets, host, dataPort).use { video ->
                 openAudio(receiverInfo, host, control, keys, sockets, navigation = false).use { audio ->
                     openAudio(receiverInfo, host, control, keys, sockets, navigation = true).use { navigation ->
@@ -105,7 +102,7 @@ internal object CarPlayScreenProbe {
                         }
                     }, "CarPlay connection heartbeat").apply { isDaemon = true; start() }
                     try {
-                        return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                        return sendVideo(video, keys.video(connectionId), resolution, onStreamStarted, onStage)
                     } finally {
                         heartbeat.interrupt()
                     }
@@ -174,6 +171,7 @@ internal object CarPlayScreenProbe {
     private fun sendVideo(
         video: Socket,
         key: ByteArray,
+        resolution: CarPlayResolution,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
     ): String {
@@ -204,6 +202,9 @@ internal object CarPlayScreenProbe {
                     nextReport = now + 5_000
                 }
                 val frame = feed.poll(200) ?: continue
+                if (frame.width != resolution.width || frame.height != resolution.height) {
+                    throw ProtocolException("CarWith frames do not match the CarPlay display resolution")
+                }
                 val writeStarted = SystemClock.elapsedRealtime()
                 frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
                 if (frames == 0) {

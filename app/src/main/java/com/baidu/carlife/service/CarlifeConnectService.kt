@@ -39,6 +39,7 @@ import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
+import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
 import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
 import java.nio.ByteBuffer
 import java.util.UUID
@@ -64,24 +65,33 @@ class CarlifeConnectService : Service() {
     private var receiverJob: Job? = null
 
     @android.annotation.SuppressLint("MissingPermission")
-    private fun startReceiver() {
+    private fun startReceiver(capture: CaptureSession) {
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         if (!settings.valid || adapter == null || missingReceiverPermissions(this).isNotEmpty()) {
-            mutableState.update { it.copy(receiverStatus = "请检查接收端设置和附近设备权限") }
+            worker.post { capture.fail("请检查接收端设置和附近设备权限") }
             return
         }
         val probe = BluetoothReceiverProbe(getSystemService(ConnectivityManager::class.java))
         receiverProbe = probe
         val timeout = projectionScope.launch {
             delay(100_000)
-            mutableState.update { it.copy(receiverStatus = "等待接收端超时") }
             stopReceiver()
+            worker.post { capture.fail("等待 CarPlay 接收端超时") }
         }
         receiverJob = projectionScope.launch {
+            var streamed = false
             try {
                 withContext(Dispatchers.IO) {
-                    probe.run(adapter, settings.name, settings.networkPairingCode, settings.address, { timeout.cancel() }, settings.receiverAddress) { stage ->
+                    probe.run(
+                        adapter, settings.name, settings.networkPairingCode, settings.address,
+                        onStreamStarted = {
+                            streamed = true
+                            timeout.cancel()
+                        },
+                        receiverAddress = settings.receiverAddress,
+                        onResolution = { resolution -> worker.post { capture.configure(resolution) } },
+                    ) { stage ->
                         Log.i("CarNatIap2", stage)
                         projectionScope.launch {
                             if (receiverProbe === probe) mutableState.update { it.copy(receiverStatus = stage) }
@@ -91,7 +101,9 @@ class CarlifeConnectService : Service() {
             } catch (failure: Exception) {
                 if (receiverProbe === probe) {
                     Log.i("CarNatIap2", "Receiver session ended", failure)
-                    mutableState.update { it.copy(receiverStatus = failure.message ?: "投屏连接失败") }
+                    val message = failure.message ?: "投屏连接失败"
+                    if (streamed) mutableState.update { it.copy(receiverStatus = message) }
+                    else worker.post { capture.fail(message) }
                 }
             } finally {
                 timeout.cancel()
@@ -188,13 +200,12 @@ class CarlifeConnectService : Service() {
         clearArm(this)
         main.removeCallbacks(armTimeout)
         mutableState.update { it.copy(phase = CapturePhase.BINDING, connectionType = connectionType) }
-        startReceiver()
+        val capture = CaptureSession()
         worker.post {
-            CaptureSession().also {
-                session = it
-                it.bind()
-            }
+            session = capture
+            capture.bind()
         }
+        startReceiver(capture)
     }
 
     override fun onDestroy() {
@@ -234,6 +245,7 @@ class CarlifeConnectService : Service() {
 
     private inner class CaptureSession : ServiceConnection {
         private var manager: ICarLifeCastManager? = null
+        private var resolution: CarPlayResolution? = null
         private var codec: MediaCodec? = null
         private var surface: Surface? = null
         private var bound = false
@@ -279,6 +291,7 @@ class CarlifeConnectService : Service() {
 
         private fun sendTouch(report: List<RemoteContact>, cancel: Boolean) {
             val listener = touchListener ?: return
+            val displayResolution = resolution ?: return
             if (closed || mutableState.value.displayId == null) return
             val now = SystemClock.uptimeMillis()
             fun dispatch(action: Int) {
@@ -287,8 +300,8 @@ class CarlifeConnectService : Service() {
                 }.toTypedArray()
                 val coordinates = contacts.map {
                     MotionEvent.PointerCoords().apply {
-                        x = it.x * (WIDTH - 1)
-                        y = it.y * (HEIGHT - 1)
+                        x = it.x * (displayResolution.width - 1)
+                        y = it.y * (displayResolution.height - 1)
                         pressure = 1f
                         size = 1f
                     }
@@ -434,19 +447,38 @@ class CarlifeConnectService : Service() {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             worker.post {
                 if (closed) return@post
-                try {
-                    val remote = ICarLifeCastManager.Stub.asInterface(binder)
-                    manager = remote
-                    Log.i(TAG, "Bound to CarWith")
-                    val inputSurface = startEncoder()
-                    mutableState.update { it.copy(phase = CapturePhase.WAITING_FOR_FRAMES) }
-                    remote.setCastCallback(callback)
-                    remote.setSystemAudioCallback(audioCallback)
-                    remote.prepareCast(CastConfig(WIDTH, HEIGHT, DPI, inputSurface))
-                    Log.i(TAG, "prepareCast returned")
-                } catch (error: Exception) {
-                    fail(error.message ?: error.javaClass.simpleName)
-                }
+                manager = ICarLifeCastManager.Stub.asInterface(binder)
+                worker.removeCallbacks(timeout)
+                Log.i(TAG, "Bound to CarWith")
+                prepareCast()
+            }
+        }
+
+        fun configure(size: CarPlayResolution) {
+            if (closed || resolution == size) return
+            if (resolution != null) {
+                fail("车机分辨率已变更为 ${size.width}×${size.height}，请重新开始投屏")
+                return
+            }
+            resolution = size
+            prepareCast()
+        }
+
+        private fun prepareCast() {
+            val remote = manager ?: return
+            val size = resolution ?: return
+            if (codec != null) return
+            try {
+                val inputSurface = startEncoder(size)
+                mutableState.update { it.copy(phase = CapturePhase.WAITING_FOR_FRAMES) }
+                worker.postDelayed(timeout, 12_000)
+                remote.setCastCallback(callback)
+                remote.setSystemAudioCallback(audioCallback)
+                remote.prepareCast(CastConfig(size.width, size.height, DPI, inputSurface))
+                Log.i(TAG, "CarWith prepareCast: ${size.width}×${size.height}")
+            } catch (error: Exception) {
+                Log.w(TAG, "CarWith setup failed for ${size.width}×${size.height}", error)
+                fail("无法以 ${size.width}×${size.height} 启动 CarWith 投屏")
             }
         }
 
@@ -460,8 +492,8 @@ class CarlifeConnectService : Service() {
             worker.post { if (!closed) fail("CarWith returned no cast interface") }
         }
 
-        private fun startEncoder(): Surface {
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, WIDTH, HEIGHT)
+        private fun startEncoder(size: CarPlayResolution): Surface {
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
@@ -524,7 +556,8 @@ class CarlifeConnectService : Service() {
                 return
             }
             val configuration = avcConfiguration ?: return
-            CarWithVideoFeed.offer(data.slice(), configuration, WIDTH, HEIGHT, keyFrame, info.presentationTimeUs)
+            val size = checkNotNull(resolution)
+            CarWithVideoFeed.offer(data.slice(), configuration, size.width, size.height, keyFrame, info.presentationTimeUs)
             if (inspectedKeyFrame || !keyFrame) return
             try {
                 val accessUnit = AvcPayload.accessUnit(data)
@@ -551,7 +584,8 @@ class CarlifeConnectService : Service() {
             mutableState.update { it.copy(phase = CapturePhase.RECEIVING, frames = frames, bytes = bytes) }
         }
 
-        private fun fail(message: String) {
+        fun fail(message: String) {
+            if (closed) return
             Log.w(TAG, message)
             mutableState.update { it.copy(phase = CapturePhase.FAILED, error = message) }
             finish()
@@ -598,8 +632,6 @@ class CarlifeConnectService : Service() {
         private const val ARM_PREFERENCES = "capture_opt_in"
         private const val ARMED_AT = "elapsed_ms"
         private const val ARMED_AT_WALL = "wall_ms"
-        private const val WIDTH = 1280
-        private const val HEIGHT = 720
         private const val DPI = 160
         private val mutableState = MutableStateFlow(CaptureStatus())
         val state = mutableState.asStateFlow()
