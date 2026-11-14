@@ -39,6 +39,8 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.navigation.runtime.ktx)
     implementation(libs.bouncycastle.provider)
     implementation(libs.dd.plist)
     implementation(platform(libs.androidx.compose.bom))

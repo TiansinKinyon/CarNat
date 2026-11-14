@@ -21,7 +21,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -39,7 +38,7 @@ import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
 @Composable
-internal fun ProjectionScreen() {
+internal fun ProjectionScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val status by CarlifeConnectService.state.collectAsState()
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
@@ -50,6 +49,7 @@ internal fun ProjectionScreen() {
         else error = "投屏需要附近设备权限"
     }
     ProjectionContent(
+        modifier = modifier,
         status = status,
         settings = settings,
         showCustomCode = showCustomCode,
@@ -83,37 +83,36 @@ private fun ProjectionContent(
     onSettingsChange: (ReceiverSettings) -> Unit,
     onToggleCustomCode: () -> Unit,
     onProjectionClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Scaffold(modifier = Modifier.fillMaxSize()) { insets ->
-        Column(
-            Modifier.padding(insets).verticalScroll(rememberScrollState()).padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("CarNat", style = MaterialTheme.typography.headlineLarge)
-            if (!supported) {
-                Text("CarPlay 投屏需要 Android 13 或更新版本")
-            } else {
-                if (!status.active) {
-                    OutlinedTextField(settings.name, { onSettingsChange(settings.copy(name = it)) },
-                        label = { Text("接收端蓝牙名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(settings.address, { onSettingsChange(settings.copy(address = it)) },
-                        label = { Text("本机蓝牙地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    TextButton(onClick = onToggleCustomCode) { Text(if (showCustomCode) "使用默认网络配对码" else "使用自定义网络配对码") }
-                    if (showCustomCode) {
-                        OutlinedTextField(settings.pin, { onSettingsChange(settings.copy(pin = it.take(16))) },
-                            label = { Text("网络配对码") }, visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true, modifier = Modifier.fillMaxWidth())
-                    }
+    Column(
+        modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("CarNat", style = MaterialTheme.typography.headlineLarge)
+        if (!supported) {
+            Text("CarPlay 投屏需要 Android 13 或更新版本")
+        } else {
+            if (!status.active) {
+                OutlinedTextField(settings.name, { onSettingsChange(settings.copy(name = it)) },
+                    label = { Text("接收端蓝牙名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(settings.address, { onSettingsChange(settings.copy(address = it)) },
+                    label = { Text("本机蓝牙地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                TextButton(onClick = onToggleCustomCode) { Text(if (showCustomCode) "使用默认网络配对码" else "使用自定义网络配对码") }
+                if (showCustomCode) {
+                    OutlinedTextField(settings.pin, { onSettingsChange(settings.copy(pin = it.take(16))) },
+                        label = { Text("网络配对码") }, visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
                 }
-                Button(enabled = status.active || settings.valid, onClick = onProjectionClick) { Text(if (status.active) "停止投屏" else "开始投屏") }
-                val message = error ?: status.error ?: status.receiverStatus ?: when (status.phase) {
-                    CapturePhase.ARMED -> "正在启动 CarWith"
-                    CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
-                    CapturePhase.STOPPED -> "投屏已停止"
-                    else -> null
-                }
-                if (message != null) Text(message)
             }
+            Button(enabled = status.active || settings.valid, onClick = onProjectionClick) { Text(if (status.active) "停止投屏" else "开始投屏") }
+            val message = error ?: status.error ?: status.receiverStatus ?: when (status.phase) {
+                CapturePhase.ARMED -> "正在启动 CarWith"
+                CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
+                CapturePhase.STOPPED -> "投屏已停止"
+                else -> null
+            }
+            if (message != null) Text(message)
         }
     }
 }
@@ -137,27 +136,33 @@ private fun startProjection(context: android.content.Context, settings: Receiver
 @Preview(name = "待连接", showBackground = true, widthDp = 360)
 @Composable
 private fun ProjectionReadyPreview() {
-    ProjectionPreview(CaptureStatus())
+    CarNatTheme { ProjectionReadyPreviewContent() }
 }
 
 @Preview(name = "投屏中", showBackground = true, widthDp = 360)
 @Composable
 private fun ProjectionActivePreview() {
-    ProjectionPreview(CaptureStatus(phase = CapturePhase.RECEIVING, receiverStatus = "正在投屏"))
+    CarNatTheme {
+        ProjectionPreviewContent(CaptureStatus(phase = CapturePhase.RECEIVING, receiverStatus = "正在投屏"))
+    }
 }
 
 @Composable
-private fun ProjectionPreview(status: CaptureStatus) {
-    CarNatTheme {
-        ProjectionContent(
-            status = status,
-            settings = ReceiverSettings(name = "CarPlay 接收端", address = "02:12:34:56:78:90"),
-            showCustomCode = false,
-            error = null,
-            supported = true,
-            onSettingsChange = {},
-            onToggleCustomCode = {},
-            onProjectionClick = {},
-        )
-    }
+internal fun ProjectionReadyPreviewContent() {
+    ProjectionPreviewContent(CaptureStatus())
+}
+
+@Composable
+private fun ProjectionPreviewContent(status: CaptureStatus) {
+    ProjectionContent(
+        status = status,
+        settings = ReceiverSettings(name = "CarPlay 接收端", address = "02:12:34:56:78:90"),
+        showCustomCode = false,
+        error = null,
+        supported = true,
+        onSettingsChange = {},
+        onToggleCustomCode = {},
+        onProjectionClick = {},
+    )
+
 }
