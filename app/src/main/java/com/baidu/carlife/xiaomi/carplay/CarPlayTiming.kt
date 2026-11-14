@@ -8,9 +8,10 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.nio.ByteBuffer
 
-internal class CarPlayTiming(host: String) : Closeable {
-    private val peer = InetAddress.getByName(host)
-    private val socket = DatagramSocket()
+internal class CarPlayTiming(
+    private val peer: InetAddress,
+    private val socket: DatagramSocket,
+) : Closeable {
     val port: Int get() = socket.localPort
 
     init {

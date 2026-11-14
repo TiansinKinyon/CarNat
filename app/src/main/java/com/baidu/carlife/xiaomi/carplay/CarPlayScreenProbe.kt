@@ -9,6 +9,7 @@ import com.dd.plist.NSArray
 import com.dd.plist.NSDictionary
 import com.dd.plist.NSNumber
 import com.dd.plist.NSString
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ProtocolException
 import java.net.Socket
@@ -24,7 +25,7 @@ internal object CarPlayScreenProbe {
     private const val FIRST_FRAME_TIMEOUT_MS = 8_000L
 
     fun run(
-        host: String,
+        host: InetAddress,
         control: RtspControl,
         info: ByteArray,
         deviceId: String,
@@ -33,7 +34,7 @@ internal object CarPlayScreenProbe {
         sockets: CarPlaySockets,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
-    ): String = CarPlayTiming(host).use { timing ->
+    ): String = CarPlayTiming(host, sockets.openDatagram()).use { timing ->
         require(bluetoothAddress.matches(deviceId))
         val receiverInfo = parse(info)
         val displays = receiverInfo.objectForKey("displays") as? NSArray
@@ -77,8 +78,8 @@ internal object CarPlayScreenProbe {
             } ?: throw ProtocolException("接收端未返回主屏流")
             val dataPort = port(screen, "dataPort")
             connect(sockets, host, dataPort).use { video ->
-                openAudio(receiverInfo, host, control, keys, navigation = false).use { audio ->
-                    openAudio(receiverInfo, host, control, keys, navigation = true).use { navigation ->
+                openAudio(receiverInfo, host, control, keys, sockets, navigation = false).use { audio ->
+                    openAudio(receiverInfo, host, control, keys, sockets, navigation = true).use { navigation ->
                         request(control, "RECORD", "/", NSDictionary())
                         audio?.start()
                         navigation?.start()
@@ -115,8 +116,8 @@ internal object CarPlayScreenProbe {
     }
 
     private fun openAudio(
-        info: NSDictionary, host: String, control: RtspControl, keys: CarPlaySessionKeys,
-        navigation: Boolean,
+        info: NSDictionary, host: InetAddress, control: RtspControl, keys: CarPlaySessionKeys,
+        sockets: CarPlaySockets, navigation: Boolean,
     ): CarPlayMediaAudio? {
         val formats = info.objectForKey("audioFormats") as? NSArray ?: return null
         val audioType = if (navigation) "alert" else "media"
@@ -165,7 +166,7 @@ internal object CarPlayScreenProbe {
             (it.objectForKey("type") as? NSNumber)?.intValue() == type &&
                 (it.objectForKey("streamConnectionID") as? NSNumber)?.longValue()?.let { it == id } != false
         } ?: return null
-        return CarPlayMediaAudio(host, port(response, "dataPort"), keys.video(id), rate, aac,
+        return CarPlayMediaAudio(sockets.openDatagram(), host, port(response, "dataPort"), keys.video(id), rate, aac,
             stream = if (navigation) 2 else 1, outputChannels = if (navigation) 1 else 2,
         )
     }
@@ -247,7 +248,7 @@ internal object CarPlayScreenProbe {
             ?: throw ProtocolException("接收端未返回有效的 $key")
     }
 
-    private fun connect(sockets: CarPlaySockets, host: String, port: Int): Socket {
+    private fun connect(sockets: CarPlaySockets, host: InetAddress, port: Int): Socket {
         val socket = sockets.open()
         try {
             socket.tcpNoDelay = true

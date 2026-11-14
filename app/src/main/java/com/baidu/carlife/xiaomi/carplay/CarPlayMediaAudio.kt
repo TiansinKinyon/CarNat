@@ -8,6 +8,7 @@ import android.util.Log
 import java.io.Closeable
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -19,8 +20,19 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Sends the native CarLife callback's PCM as authenticated CarPlay RTP. */
-internal class CarPlayMediaAudio(host: String, port: Int, key: ByteArray, private val rate: Int, private val aac: Boolean, private val stream: Int, private val outputChannels: Int) : Closeable {
-    private val socket = DatagramSocket().apply { connect(InetSocketAddress(host, port)) }
+internal class CarPlayMediaAudio(
+    private val socket: DatagramSocket,
+    host: InetAddress,
+    port: Int,
+    key: ByteArray,
+    private val rate: Int,
+    private val aac: Boolean,
+    private val stream: Int,
+    private val outputChannels: Int,
+) : Closeable {
+    init {
+        socket.connect(InetSocketAddress(host, port))
+    }
     private val secret = SecretKeySpec(key, "ChaCha20")
     private val queue = ArrayBlockingQueue<Chunk>(16)
     private val droppedChunks = AtomicLong()

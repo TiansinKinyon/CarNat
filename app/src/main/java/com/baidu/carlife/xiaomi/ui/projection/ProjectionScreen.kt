@@ -51,6 +51,7 @@ import com.baidu.carlife.service.CaptureStatus
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
+import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
 @Composable
@@ -72,6 +73,17 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         } else {
             error = "投屏需要附近设备权限"
         }
+    }
+    fun beginProjection() {
+        val receiver = pairedReceivers(context)?.firstOrNull {
+            it.address.equals(settings.receiverAddress, ignoreCase = true)
+        }
+        error = if (receiver == null) "请开启蓝牙并选择已配对的接收端"
+        else startProjection(context, settings.copy(name = receiver.name))
+    }
+    val projectionPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        if (missingReceiverPermissions(context).isEmpty()) beginProjection()
+        else error = "请允许附近设备和局域网访问权限，以连接车机"
     }
     ProjectionContent(
         modifier = modifier,
@@ -110,14 +122,10 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
             error = null
             if (status.active) {
                 CarlifeConnectService.stopDiagnostic(context)
-            } else if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                val receiver = pairedReceivers(context)?.firstOrNull {
-                    it.address.equals(settings.receiverAddress, ignoreCase = true)
-                }
-                error = if (receiver == null) "请开启蓝牙并选择已配对的接收端"
-                else startProjection(context, settings.copy(name = receiver.name))
             } else {
-                permission.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                val missing = missingReceiverPermissions(context)
+                if (missing.isEmpty()) beginProjection()
+                else projectionPermissions.launch(missing)
             }
         },
     )

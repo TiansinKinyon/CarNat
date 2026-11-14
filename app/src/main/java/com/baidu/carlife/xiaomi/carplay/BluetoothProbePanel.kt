@@ -1,8 +1,7 @@
 package com.baidu.carlife.xiaomi.carplay
 
-import android.Manifest
 import android.bluetooth.BluetoothManager
-import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,11 +45,11 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
         val receiver = name.trim()
         val receiverPin = pin
         val localBluetoothAddress = deviceId.trim()
-        val probe = BluetoothReceiverProbe()
+        val probe = BluetoothReceiverProbe(context.getSystemService(ConnectivityManager::class.java))
         active = probe
         message = "正在启动蓝牙诊断"
         val timeout = scope.launch {
-            delay(45_000)
+            delay(100_000)
             if (active == probe) {
                 message = "蓝牙诊断超时"
                 active = null
@@ -79,8 +78,9 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
         }
     }
 
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) start() else message = "需要附近设备权限才能测试蓝牙"
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        if (missingReceiverPermissions(context).isEmpty()) start()
+        else message = "请允许附近设备和局域网访问权限，以连接车机"
     }
     DisposableEffect(active) {
         val probe = active
@@ -115,12 +115,9 @@ internal fun BluetoothProbePanel(pin: String, validPin: Boolean) {
                     active = null
                     probe.close()
                     message = "蓝牙诊断已停止"
-                } else if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) ==
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    start()
                 } else {
-                    permission.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                    val missing = missingReceiverPermissions(context)
+                    if (missing.isEmpty()) start() else permission.launch(missing)
                 }
             },
         ) {

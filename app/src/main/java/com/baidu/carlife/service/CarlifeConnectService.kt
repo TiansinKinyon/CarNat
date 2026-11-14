@@ -13,6 +13,7 @@ import android.content.ServiceConnection
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.net.ConnectivityManager
 import android.os.Binder
 import android.os.Build
 import android.os.Bundle
@@ -43,6 +44,7 @@ import java.nio.ByteBuffer
 import java.util.UUID
 import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
+import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -65,16 +67,14 @@ class CarlifeConnectService : Service() {
     private fun startReceiver() {
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
-        if (!settings.valid || adapter == null || checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!settings.valid || adapter == null || missingReceiverPermissions(this).isNotEmpty()) {
             mutableState.update { it.copy(receiverStatus = "请检查接收端设置和附近设备权限") }
             return
         }
-        val probe = BluetoothReceiverProbe()
+        val probe = BluetoothReceiverProbe(getSystemService(ConnectivityManager::class.java))
         receiverProbe = probe
         val timeout = projectionScope.launch {
-            delay(45_000)
+            delay(100_000)
             mutableState.update { it.copy(receiverStatus = "等待接收端超时") }
             stopReceiver()
         }

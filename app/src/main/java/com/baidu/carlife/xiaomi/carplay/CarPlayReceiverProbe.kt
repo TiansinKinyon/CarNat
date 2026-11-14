@@ -15,7 +15,7 @@ internal object CarPlayReceiverProbe {
     ): String {
         sockets.open().use { socket ->
             onStage("正在连接接收端")
-            socket.connect(InetSocketAddress(host, port), 5_000)
+            socket.connect(InetSocketAddress(sockets.resolve(host), port), 5_000)
             socket.soTimeout = 8_000
             RtspControl(socket.getInputStream(), socket.getOutputStream(), socket).use { control ->
                 onStage("正在读取接收端信息")
@@ -31,7 +31,7 @@ internal object CarPlayReceiverProbe {
                     val authenticated = "加密网络会话和 MFi-SAP 签名验证通过"
                     if (deviceId.isEmpty()) return authenticated
                     onStage(authenticated)
-                    return CarPlayScreenProbe.run(host, control, info.body, deviceId, keys, bluetoothCertificate, sockets, onStreamStarted, onStage)
+                    return CarPlayScreenProbe.run(socket.inetAddress, control, info.body, deviceId, keys, bluetoothCertificate, sockets, onStreamStarted, onStage)
                 }
                 return "接收端身份验证通过 · /info ${info.body.size} 字节"
             }

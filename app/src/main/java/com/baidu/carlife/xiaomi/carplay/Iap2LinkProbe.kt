@@ -13,17 +13,19 @@ import java.security.cert.X509Certificate
 internal object Iap2LinkProbe {
     private val detection = byteArrayOf(-1, 0x55, 2, 0, -18, 16)
 
-    class Endpoint(val host: String, val port: Int, val certificate: X509Certificate)
+    class Endpoint(val host: String, val port: Int, val certificate: X509Certificate, val wifi: ReceiverWifi?)
 
-    fun run(input: InputStream, output: OutputStream, onStage: (String) -> Unit): Endpoint =
-        exchange(input, output, null, onStage)
+    fun run(
+        input: InputStream, output: OutputStream, onWifi: (ReceiverWifi) -> Unit = {}, onStage: (String) -> Unit,
+    ): Endpoint = exchange(input, output, null, onWifi, onStage)
 
     fun runNetwork(input: InputStream, output: OutputStream, certificate: X509Certificate, onStage: (String) -> Unit) {
-        exchange(input, output, certificate, onStage)
+        exchange(input, output, certificate, {}, onStage)
     }
 
     private fun exchange(
         input: InputStream, output: OutputStream, expectedCertificate: X509Certificate?,
+        onWifi: (ReceiverWifi) -> Unit,
         onStage: (String) -> Unit,
     ): Endpoint {
         val incoming = DataInputStream(input)
@@ -40,6 +42,8 @@ internal object Iap2LinkProbe {
         var challenge: ByteArray? = null
         var leaf: X509Certificate? = null
         var authenticated = false
+        var requestWifi = false
+        var wifi: ReceiverWifi? = null
 
         fun sendControl(id: Int, value: ByteArray? = null, parameterId: Int = 0) {
             localSequence = (localSequence + 1) and 255
@@ -132,14 +136,26 @@ internal object Iap2LinkProbe {
                             val message = takeMessage(controlData) ?: break
                             val id = unsignedShort(message, 4)
                             if (authenticated) {
-                                if (id == 0x4301 && expectedCertificate == null) {
-                                    val endpoint = receiverEndpoint(message, checkNotNull(leaf))
-                                    onStage("已收到 CarPlay 网络端点：${endpoint.host}:${endpoint.port}")
-                                    return endpoint
+                                if (expectedCertificate == null) {
+                                    when (id) {
+                                        0x5703 -> if (wifi == null) {
+                                            wifi = ReceiverWifi.fromConfiguration(parameters(message))
+                                            wifi?.let(onWifi)
+                                        }
+                                        0x4301 -> {
+                                            val endpoint = receiverEndpoint(message, checkNotNull(leaf), wifi)
+                                            onStage("已收到 CarPlay 网络端点：${endpoint.host}:${endpoint.port}")
+                                            return endpoint
+                                        }
+                                    }
                                 }
                             } else if (!awaitingCertificate) {
                                 if (id != 0x1d01) throw ProtocolException("Expected receiver identification")
                                 onStage("已收到 iAP2 接收端身份：${receiverIdentity(message)}")
+                                val receivedIds = parameters(message)[7]
+                                requestWifi = receivedIds != null && (0 until receivedIds.size - 1 step 2).any {
+                                    unsignedShort(receivedIds, it) == 0x5702
+                                }
                                 sendControl(0x1d02)
                                 sendControl(0xaa00)
                                 awaitingCertificate = true
@@ -172,6 +188,7 @@ internal object Iap2LinkProbe {
                                 authenticated = true
                                 // Availability group 1 contains parameter 0 (wireless available = true).
                                 if (expectedCertificate == null) {
+                                    if (requestWifi) sendControl(0x5702)
                                     sendControl(0x4300, byteArrayOf(0, 5, 0, 0, 1), parameterId = 1)
                                 } else {
                                     onStage("网络 iAP2 已认证")
@@ -210,7 +227,7 @@ internal object Iap2LinkProbe {
         return message.copyOf(size)
     }
 
-    private fun parameters(message: ByteArray, start: Int = 6): Map<Int, ByteArray> {
+    private fun parameters(message: ByteArray, start: Int = 6, repeatableFields: Set<Int> = emptySet()): Map<Int, ByteArray> {
         val fields = mutableMapOf<Int, ByteArray>()
         var offset = start
         while (offset < message.size) {
@@ -218,7 +235,9 @@ internal object Iap2LinkProbe {
             val length = unsignedShort(message, offset)
             if (length !in 4..(message.size - offset)) throw ProtocolException("Invalid iAP2 parameter")
             val field = unsignedShort(message, offset + 2)
-            if (fields.put(field, message.copyOfRange(offset + 4, offset + length)) != null) {
+            if (field !in fields) {
+                fields[field] = message.copyOfRange(offset + 4, offset + length)
+            } else if (field !in repeatableFields) {
                 throw ProtocolException("Duplicate iAP2 parameter")
             }
             offset += length
@@ -226,18 +245,23 @@ internal object Iap2LinkProbe {
         return fields
     }
 
-    private fun receiverEndpoint(message: ByteArray, certificate: X509Certificate): Endpoint {
+    private fun receiverEndpoint(
+        message: ByteArray, certificate: X509Certificate, configuration: ReceiverWifi?,
+    ): Endpoint {
         val fields = parameters(message)
-        val network = fields[1]?.let { parameters(it, start = 0) }
-            ?: throw ProtocolException("Missing CarPlay network parameters")
-        val host = network[3]?.toString(Charsets.US_ASCII)?.substringBefore('\u0000')
+        val wireless = fields[1] ?: throw ProtocolException("Missing CarPlay network parameters")
+        // Some receivers shift the wireless field IDs by one. Either layout can repeat its IP field.
+        val network = parameters(wireless, start = 0, repeatableFields = setOf(3, 4))
+        val offset = if (0 !in network && 5 in network) 1 else 0
+        val host = network[3 + offset]?.toString(Charsets.US_ASCII)?.substringBefore('\u0000')
             ?.takeIf { it.isNotBlank() && it.all { character -> character in '!'..'~' } }
             ?: throw ProtocolException("Missing CarPlay endpoint address")
         val portBytes = fields[2]?.takeIf { it.size == 4 }
             ?: throw ProtocolException("Invalid CarPlay endpoint port")
         val port = java.nio.ByteBuffer.wrap(portBytes).int
         if (port !in 1..65535) throw ProtocolException("Invalid CarPlay endpoint port")
-        return Endpoint(host, port, certificate)
+        val wifi = configuration ?: ReceiverWifi.fromStartSession(network, offset)
+        return Endpoint(host, port, certificate, wifi)
     }
     private fun receiverIdentity(message: ByteArray): String {
         val fields = parameters(message)

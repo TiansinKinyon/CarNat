@@ -26,7 +26,7 @@ class Iap2LinkProbeTest {
         val stages = mutableListOf<String>()
 
         assertThrows(EOFException::class.java) {
-            Iap2LinkProbe.run(ByteArrayInputStream(input), output, stages::add)
+            Iap2LinkProbe.run(ByteArrayInputStream(input), output, onStage = stages::add)
         }
 
         assertArrayEquals(

@@ -5,13 +5,18 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
+import android.net.ConnectivityManager
+import android.os.Build
 import android.os.SystemClock
 import com.baidu.carlife.service.CarlifeConnectService
 import java.io.Closeable
 import java.io.IOException
 import java.util.UUID
 
-internal class BluetoothReceiverProbe : Closeable {
+internal class BluetoothReceiverProbe(
+    private val connectivity: ConnectivityManager,
+) : Closeable {
+    private var wifiRequest: Closeable? = null
     private var sockets: CarPlaySockets? = null
     private var server: BluetoothServerSocket? = null
     private var peer: BluetoothSocket? = null
@@ -88,8 +93,26 @@ internal class BluetoothReceiverProbe : Closeable {
             throw IOException("忽略了来自其他蓝牙设备的连接")
         }
         onStage("蓝牙 RFCOMM 已连接")
-        val endpoint = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, onStage)
+        var accessPoint: ReceiverWifiRequest? = null
+        fun requestWifi(wifi: ReceiverWifi) {
+            if (pin.isEmpty() || Build.VERSION.SDK_INT < 29 || accessPoint != null) return
+            onStage("正在连接车机 Wi-Fi · 如有系统提示，请确认")
+            val request = ReceiverWifiRequest(connectivity, attempt::close)
+            synchronized(this) {
+                if (closed) throw IOException("CarPlay 会话已停止")
+                request.start(wifi)
+                wifiRequest = request
+                accessPoint = request
+            }
+        }
+        val endpoint = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, ::requestWifi, onStage)
         if (pin.isNotEmpty()) {
+            endpoint.wifi?.let(::requestWifi)
+            if (Build.VERSION.SDK_INT >= 29) accessPoint?.let { request ->
+                val network = request.awaitNetwork()
+                attempt.useNetwork(network, connectivity.getLinkProperties(network)?.interfaceName)
+                onStage("已连接车机 Wi-Fi")
+            }
             onStage(CarPlayReceiverProbe.verify(
                 endpoint.host, endpoint.port, pin, endpoint.certificate, deviceId, attempt, onStreamStarted, onStage,
             ))
@@ -102,6 +125,8 @@ internal class BluetoothReceiverProbe : Closeable {
     @Synchronized
     private fun closeAttempt() {
         sockets?.close()
+        runCatching { wifiRequest?.close() }
+        wifiRequest = null
         runCatching { peer?.close() }
         runCatching { server?.close() }
         sockets = null
