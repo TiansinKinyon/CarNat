@@ -28,8 +28,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -40,17 +42,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CaptureStatus
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
 @Composable
-internal fun ProjectionScreen(modifier: Modifier = Modifier) {
+internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val status by CarlifeConnectService.state.collectAsState()
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
@@ -58,12 +62,16 @@ internal fun ProjectionScreen(modifier: Modifier = Modifier) {
     var error by remember { mutableStateOf<String?>(null) }
     var devices by remember { mutableStateOf<List<PairedReceiver>?>(null) }
     var expanded by remember { mutableStateOf(false) }
+    LaunchedEffect(active) {
+        if (!active) expanded = false
+    }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             devices = pairedReceivers(context)
             expanded = true
+        } else {
+            error = "投屏需要附近设备权限"
         }
-        else error = "投屏需要附近设备权限"
     }
     ProjectionContent(
         modifier = modifier,
@@ -75,7 +83,7 @@ internal fun ProjectionScreen(modifier: Modifier = Modifier) {
         receiverPicker = {
             val selectedName = settings.name.takeIf { settings.receiverAddress.isNotEmpty() }.orEmpty()
             ReceiverPicker(
-                selectedName, settings.receiverAddress, devices, expanded, onDismiss = { expanded = false },
+                selectedName, settings.receiverAddress, devices, expanded && active, onDismiss = { expanded = false },
                 onOpen = {
                     error = null
                     if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
@@ -132,7 +140,6 @@ private fun ProjectionContent(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("CarNat", style = MaterialTheme.typography.headlineLarge)
         if (!supported) {
             Text("CarPlay 投屏需要 Android 13 或更新版本")
         } else {
@@ -159,7 +166,7 @@ private fun ProjectionContent(
     }
 }
 
-private fun startProjection(context: android.content.Context, settings: ReceiverSettings): String? {
+private fun startProjection(context: Context, settings: ReceiverSettings): String? {
     if (!settings.valid || !settings.save(context)) return "无法保存接收端设置"
     val entry = ComponentName("com.miui.carlink", "com.miui.carlink.castfwk.usb.CarlifeAdbActivity")
     CarlifeConnectService.startDiagnostic(context)
@@ -207,7 +214,6 @@ private fun ProjectionPreviewContent(status: CaptureStatus) {
         onToggleCustomCode = {},
         onProjectionClick = {},
     )
-
 }
 
 private data class PairedReceiver(val name: String, val address: String)
@@ -243,7 +249,8 @@ private fun ReceiverPicker(
             onValueChange = {},
             readOnly = true,
             singleLine = true,
-            label = { Text("蓝牙接收端") },
+            leadingIcon = { Icon(painterResource(R.drawable.ic_bluetooth_drive), contentDescription = null) },
+            label = { Text("车载蓝牙") },
             placeholder = { Text("选择已配对设备") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),

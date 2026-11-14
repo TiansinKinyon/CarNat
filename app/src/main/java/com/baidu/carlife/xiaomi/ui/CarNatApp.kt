@@ -1,29 +1,59 @@
 package com.baidu.carlife.xiaomi.ui
 
+import android.content.res.Configuration
 import androidx.annotation.DrawableRes
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.currentStateAsState
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.ui.help.HelpScreen
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionReadyPreviewContent
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionScreen
-import com.baidu.carlife.xiaomi.ui.settings.SettingDetailScreen
 import com.baidu.carlife.xiaomi.ui.settings.SettingEntry
 import com.baidu.carlife.xiaomi.ui.settings.SettingsScreen
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
@@ -40,64 +70,169 @@ private enum class Destination(
 
 @Composable
 internal fun CarNatApp() {
-    CarNatNavigation { ProjectionScreen() }
+    CarNatNavigation { active -> ProjectionScreen(active = active) }
 }
 
 @Composable
-private fun CarNatNavigation(connectionPage: @Composable () -> Unit) {
+private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
     val navController = rememberNavController()
-    val entry by navController.currentBackStackEntryAsState()
-    val route = entry?.destination?.route ?: Destination.CONNECT.route
+    NavHost(
+        navController = navController,
+        startDestination = Destination.CONNECT.route,
+        modifier = Modifier.fillMaxSize().clipToBounds(),
+        enterTransition = {
+            if (targetState.isSettingDetail) slideInHorizontally(tween(280)) { it }
+            else fadeIn(tween(180))
+        },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = {
+            if (initialState.isSettingDetail) slideOutHorizontally(tween(240)) { it }
+            else fadeOut(tween(180))
+        },
+        predictivePopEnterTransition = { EnterTransition.None },
+        predictivePopExitTransition = {
+            if (initialState.isSettingDetail) slideOutHorizontally(tween(240, easing = LinearEasing)) { it }
+            else fadeOut(tween(180, easing = LinearEasing))
+        },
+    ) {
+        Destination.entries.forEach { destination ->
+            composable(destination.route) { entry ->
+                NavigationPage(
+                    entry = entry,
+                    title = destination.label,
+                    selectedDestination = destination,
+                    onNavigate = { item ->
+                        if (item != destination) {
+                            navController.navigate(item.route) {
+                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        }
+                    },
+                ) { active ->
+                    when (destination) {
+                        Destination.CONNECT -> connectionPage(active)
+                        Destination.HELP -> HelpScreen()
+                        Destination.SETTINGS -> SettingsScreen { setting ->
+                            if (active) navController.navigate(setting.route) { launchSingleTop = true }
+                        }
+                    }
+                }
+            }
+        }
+        SettingEntry.entries.forEach { setting ->
+            composable(setting.route) { entry ->
+                NavigationPage(
+                    entry = entry,
+                    title = setting.title,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+    }
+}
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        bottomBar = {
-            NavigationBar {
-                Destination.entries.forEach { destination ->
-                    val selected = route == destination.route ||
-                        (destination == Destination.SETTINGS && route.startsWith("settings/"))
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = {
-                            if (!selected) {
-                                navController.navigate(destination.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
-                                    }
-                                    launchSingleTop = true
-                                    restoreState = true
+private val NavBackStackEntry.isSettingDetail: Boolean
+    get() = SettingEntry.entries.any { it.route == destination.route }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AnimatedVisibilityScope.NavigationPage(
+    entry: NavBackStackEntry,
+    title: String,
+    selectedDestination: Destination? = null,
+    onNavigate: (Destination) -> Unit = {},
+    onBack: (() -> Unit)? = null,
+    content: @Composable (Boolean) -> Unit = {},
+) {
+    val lifecycleState by entry.lifecycle.currentStateAsState()
+    val active = lifecycleState == Lifecycle.State.RESUMED &&
+        transition.currentState == EnterExitState.Visible &&
+        transition.targetState == EnterExitState.Visible &&
+        !transition.isRunning
+    val latestActive = rememberUpdatedState(active)
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .gatePageInput { latestActive.value }
+            .then(if (active) Modifier else Modifier.clearAndSetSemantics { hideFromAccessibility() }),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Row(Modifier.fillMaxSize()) {
+            if (landscape && selectedDestination != null) {
+                NavigationRail(modifier = Modifier.fillMaxHeight()) {
+                    Destination.entries.forEach { item ->
+                        NavigationRailItem(
+                            selected = selectedDestination == item,
+                            onClick = { if (active) onNavigate(item) },
+                            icon = { DestinationIcon(item) },
+                            label = { Text(item.label) },
+                        )
+                    }
+                }
+            }
+            Scaffold(
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                topBar = {
+                    TopAppBar(
+                        title = { Text(title) },
+                        navigationIcon = {
+                            if (onBack != null) {
+                                IconButton(onClick = { if (active) onBack() }) {
+                                    Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = "返回设置")
                                 }
                             }
                         },
-                        icon = {
-                            Icon(painterResource(destination.iconRes), contentDescription = null)
-                        },
-                        label = { Text(destination.label) },
                     )
-                }
-            }
-        },
-    ) { innerPadding ->
-        NavHost(
-            navController = navController,
-            startDestination = Destination.CONNECT.route,
-            modifier = Modifier.padding(innerPadding).consumeWindowInsets(innerPadding),
-        ) {
-            composable(Destination.CONNECT.route) { connectionPage() }
-            composable(Destination.HELP.route) { HelpScreen() }
-            composable(Destination.SETTINGS.route) {
-                SettingsScreen(onOpen = { navController.navigate(it.route) { launchSingleTop = true } })
-            }
-            SettingEntry.entries.forEach { setting ->
-                composable(setting.route) {
-                    SettingDetailScreen(setting, onBack = { navController.popBackStack() })
+                },
+                bottomBar = {
+                    if (!landscape && selectedDestination != null) {
+                        NavigationBar {
+                            Destination.entries.forEach { item ->
+                                NavigationBarItem(
+                                    selected = selectedDestination == item,
+                                    onClick = { if (active) onNavigate(item) },
+                                    icon = { DestinationIcon(item) },
+                                    label = { Text(item.label) },
+                                )
+                            }
+                        }
+                    }
+                },
+            ) { innerPadding ->
+                Box(Modifier.fillMaxSize().padding(innerPadding).consumeWindowInsets(innerPadding)) {
+                    content(active)
                 }
             }
         }
     }
 }
 
-@Preview(name = "CarNat 底部导航", showBackground = true, widthDp = 360, heightDp = 720)
+private fun Modifier.gatePageInput(isActive: () -> Boolean): Modifier = this
+    .onPreviewKeyEvent { !isActive() }
+    .pointerInput(Unit) {
+        awaitPointerEventScope {
+            var blockedGesture = false
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                // A gesture blocked during a transition stays blocked through the last pointer up.
+                if (!isActive()) blockedGesture = true
+                if (blockedGesture) event.changes.forEach { it.consume() }
+                if (event.changes.none { it.pressed }) blockedGesture = false
+            }
+        }
+    }
+
+@Composable
+private fun DestinationIcon(destination: Destination) {
+    Icon(painterResource(destination.iconRes), contentDescription = null)
+}
+
+@Preview(showBackground = true, widthDp = 360, heightDp = 720)
 @Composable
 private fun CarNatAppPreview() {
     CarNatTheme { CarNatNavigation { ProjectionReadyPreviewContent() } }

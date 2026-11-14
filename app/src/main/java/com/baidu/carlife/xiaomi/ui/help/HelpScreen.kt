@@ -20,10 +20,9 @@ internal fun HelpScreen() {
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        Text("帮助", style = MaterialTheme.typography.headlineLarge)
         HelpSection(
             "首次连接",
-            "先在系统蓝牙设置中配对接收端，并让手机接入接收端热点或可互通的局域网。回到「连接」页填写接收端名称和本机蓝牙地址，然后点「开始投屏」。",
+            "先在系统蓝牙设置中配对接收端，并让手机接入接收端热点或可互通的局域网。回到「连接」页选择已配对的接收端并填写本机蓝牙地址，然后点「开始投屏」。",
         )
         HelpSection(
             "网络配对码",
