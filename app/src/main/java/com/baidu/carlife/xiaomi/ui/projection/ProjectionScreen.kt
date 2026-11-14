@@ -13,16 +13,21 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
@@ -70,7 +75,7 @@ internal fun ProjectionScreen(modifier: Modifier = Modifier) {
         receiverPicker = {
             val selectedName = settings.name.takeIf { settings.receiverAddress.isNotEmpty() }.orEmpty()
             ReceiverPicker(
-                selectedName, devices, expanded, onDismiss = { expanded = false },
+                selectedName, settings.receiverAddress, devices, expanded, onDismiss = { expanded = false },
                 onOpen = {
                     error = null
                     if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
@@ -197,7 +202,7 @@ private fun ProjectionPreviewContent(status: CaptureStatus) {
         showCustomCode = false,
         error = null,
         supported = true,
-        receiverPicker = { ReceiverPicker("CarPlay 接收端", emptyList(), false, {}, {}, {}) },
+        receiverPicker = { ReceiverPicker("CarPlay 接收端", "02:00:00:00:00:01", emptyList(), false, {}, {}, {}) },
         onSettingsChange = {},
         onToggleCustomCode = {},
         onProjectionClick = {},
@@ -218,21 +223,37 @@ private fun pairedReceivers(context: Context): List<PairedReceiver>? = try {
     null
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ReceiverPicker(
     selectedName: String,
+    selectedAddress: String,
     devices: List<PairedReceiver>?,
     expanded: Boolean,
     onDismiss: () -> Unit,
     onOpen: () -> Unit,
     onSelect: (PairedReceiver) -> Unit,
 ) {
-    Box(Modifier.fillMaxWidth()) {
-        OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth()) {
-            Text(selectedName.ifBlank { "选择已配对的蓝牙接收端" })
-            Text(" ▾")
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { if (it) onOpen() else onDismiss() },
+    ) {
+        OutlinedTextField(
+            value = selectedName,
+            onValueChange = {},
+            readOnly = true,
+            singleLine = true,
+            label = { Text("蓝牙接收端") },
+            placeholder = { Text("选择已配对设备") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismiss,
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ) {
             if (devices.isNullOrEmpty()) {
                 DropdownMenuItem(
                     text = { Text(if (devices == null) "请开启蓝牙并检查附近设备权限" else "请先在系统蓝牙设置中配对") },
@@ -240,16 +261,37 @@ private fun ReceiverPicker(
                 )
             }
             devices.orEmpty().forEach { device ->
+                val selected = device.address.equals(selectedAddress, ignoreCase = true)
+                val colors = MaterialTheme.colorScheme
                 DropdownMenuItem(
                     text = {
                         Column {
-                            Text(device.name)
-                            Text(device.address, style = MaterialTheme.typography.bodySmall)
+                            Text(device.name, color = if (selected) colors.onSecondaryContainer else colors.onSurface)
+                            Text(device.address, style = MaterialTheme.typography.bodySmall,
+                                color = if (selected) colors.onSecondaryContainer else colors.onSurfaceVariant)
                         }
                     },
+                    leadingIcon = if (selected) {
+                        { SelectionCheck() }
+                    } else null,
                     onClick = { onSelect(device) },
+                    modifier = if (selected) Modifier.padding(horizontal = 4.dp)
+                        .background(colors.secondaryContainer, RoundedCornerShape(12.dp))
+                    else Modifier,
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SelectionCheck() {
+    val color = MaterialTheme.colorScheme.onSecondaryContainer
+    Canvas(Modifier.size(20.dp)) {
+        val start = androidx.compose.ui.geometry.Offset(size.width * .2f, size.height * .5f)
+        val corner = androidx.compose.ui.geometry.Offset(size.width * .4f, size.height * .7f)
+        val end = androidx.compose.ui.geometry.Offset(size.width * .8f, size.height * .3f)
+        drawLine(color, start, corner, strokeWidth = 2.dp.toPx())
+        drawLine(color, corner, end, strokeWidth = 2.dp.toPx())
     }
 }
