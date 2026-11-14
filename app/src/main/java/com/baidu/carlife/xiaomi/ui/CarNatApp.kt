@@ -52,6 +52,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.ui.help.HelpScreen
+import com.baidu.carlife.xiaomi.ui.monitoring.MonitoringScreen
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionReadyPreviewContent
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionScreen
 import com.baidu.carlife.xiaomi.ui.settings.SettingEntry
@@ -65,6 +66,7 @@ private enum class Destination(
 ) {
     CONNECT("connect", "连接", R.drawable.ic_connect),
     HELP("help", "帮助", R.drawable.ic_help),
+    MONITORING("monitoring", "检测", R.drawable.ic_monitoring),
     SETTINGS("settings", "设置", R.drawable.ic_settings),
 }
 
@@ -115,6 +117,7 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
                     when (destination) {
                         Destination.CONNECT -> connectionPage(active)
                         Destination.HELP -> HelpScreen()
+                        Destination.MONITORING -> MonitoringScreen(active)
                         Destination.SETTINGS -> SettingsScreen { setting ->
                             if (active) navController.navigate(setting.route) { launchSingleTop = true }
                         }

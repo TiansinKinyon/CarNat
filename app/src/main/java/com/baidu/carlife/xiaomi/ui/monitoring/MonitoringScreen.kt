@@ -1,0 +1,124 @@
+package com.baidu.carlife.xiaomi.ui.monitoring
+
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.baidu.carlife.service.CapturePhase
+import com.baidu.carlife.service.CaptureStatus
+import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
+import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
+import com.baidu.carlife.xiaomi.carplay.ReceiverWifi
+import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
+
+@Composable
+internal fun MonitoringScreen(active: Boolean) {
+    val capture by CarlifeConnectService.state.collectAsStateWithLifecycle()
+    val receiver by CarlifeConnectService.receiverDiagnostics.collectAsStateWithLifecycle()
+    MonitoringContent(capture, receiver, active)
+}
+
+@Composable
+private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnostics, active: Boolean) {
+    val wifi = receiver.wifi
+    var showPassword by remember(wifi, active) { mutableStateOf(false) }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 12.dp),
+    ) {
+        SectionTitle("CarWith")
+        Metric("输出分辨率", resolutionLabel(capture.outputWidth, capture.outputHeight))
+        Metric("实时帧率", capture.outputFps?.let { "%.1f fps".format(it) })
+        Metric("视频码率", capture.outputMbps?.let { "%.2f Mbps".format(it) })
+        Metric("累计输出帧数", capture.frames.takeIf { capture.outputFps != null || it > 0 }?.toString())
+        Metric("虚拟屏 ID", capture.displayId?.toString())
+
+        HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+
+        SectionTitle("车机 CarPlay")
+        Metric("请求分辨率", resolutionLabel(receiver.resolution?.width, receiver.resolution?.height))
+        Metric("Wi-Fi SSID", wifi?.ssid)
+        ListItem(
+            headlineContent = { Text("Wi-Fi 密码") },
+            supportingContent = {
+                Text(
+                    when {
+                        wifi == null -> "—"
+                        wifi.passphrase.isEmpty() -> "无需密码"
+                        active && showPassword -> wifi.passphrase
+                        else -> "••••••••"
+                    },
+                )
+            },
+            trailingContent = wifi?.takeIf { it.passphrase.isNotEmpty() }?.let {
+                {
+                    TextButton(onClick = { showPassword = !showPassword }, enabled = active) {
+                        Text(if (showPassword) "隐藏" else "显示")
+                    }
+                }
+            },
+        )
+        Metric("连接状态", capture.error ?: capture.receiverStatus)
+    }
+}
+
+@Composable
+private fun SectionTitle(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).semantics { heading() },
+    )
+}
+
+@Composable
+private fun Metric(label: String, value: String?) {
+    ListItem(
+        headlineContent = { Text(label) },
+        supportingContent = { Text(value ?: "—") },
+    )
+}
+
+private fun resolutionLabel(width: Int?, height: Int?): String? =
+    if (width != null && height != null) "${width} × ${height}" else null
+
+@Preview(showBackground = true, widthDp = 360, heightDp = 760)
+@Composable
+private fun MonitoringPreview() {
+    CarNatTheme {
+        MonitoringContent(
+            CaptureStatus(
+                phase = CapturePhase.RECEIVING,
+                frames = 1253,
+                displayId = 42,
+                outputWidth = 1920,
+                outputHeight = 766,
+                outputFps = 29.8,
+                outputMbps = 3.84,
+                receiverStatus = "正在投屏",
+            ),
+            ReceiverDiagnostics(CarPlayResolution(1920, 766), ReceiverWifi("CarPlay", "preview-password", 2)),
+            active = true,
+        )
+    }
+}

@@ -44,6 +44,7 @@ import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
 import java.nio.ByteBuffer
 import java.util.UUID
 import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
+import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import kotlinx.coroutines.CoroutineScope
@@ -91,6 +92,11 @@ class CarlifeConnectService : Service() {
                         },
                         receiverAddress = settings.receiverAddress,
                         onResolution = { resolution -> worker.post { capture.configure(resolution) } },
+                        onDiagnostics = { diagnostics ->
+                            projectionScope.launch {
+                                if (receiverProbe === probe) mutableReceiverDiagnostics.value = diagnostics
+                            }
+                        },
                     ) { stage ->
                         Log.i("CarNatIap2", stage)
                         projectionScope.launch {
@@ -107,7 +113,10 @@ class CarlifeConnectService : Service() {
                 }
             } finally {
                 timeout.cancel()
-                if (receiverProbe === probe) receiverProbe = null
+                if (receiverProbe === probe) {
+                    receiverProbe = null
+                    mutableReceiverDiagnostics.value = ReceiverDiagnostics()
+                }
             }
         }
     }
@@ -115,6 +124,7 @@ class CarlifeConnectService : Service() {
     private fun stopReceiver() {
         receiverProbe?.close()
         receiverProbe = null
+        mutableReceiverDiagnostics.value = ReceiverDiagnostics()
         receiverJob?.cancel()
         receiverJob = null
     }
@@ -252,7 +262,25 @@ class CarlifeConnectService : Service() {
         private var closed = false
         private var frames = 0L
         private var bytes = 0L
-        private var publishedAtMs = 0L
+        private var sampledAtMs = 0L
+        private var sampledFrames = 0L
+        private var sampledBytes = 0L
+        private val sampleOutput = object : Runnable {
+            override fun run() {
+                if (closed) return
+                val now = SystemClock.elapsedRealtime()
+                val elapsed = (now - sampledAtMs).coerceAtLeast(1)
+                val fps = (frames - sampledFrames) * 1_000.0 / elapsed
+                val megabitsPerSecond = (bytes - sampledBytes) * 0.008 / elapsed
+                sampledAtMs = now
+                sampledFrames = frames
+                sampledBytes = bytes
+                mutableState.update {
+                    it.copy(frames = frames, bytes = bytes, outputFps = fps, outputMbps = megabitsPerSecond)
+                }
+                worker.postDelayed(this, OUTPUT_SAMPLE_MS)
+            }
+        }
         private var avcConfiguration: ByteArray? = null
         private var inspectedKeyFrame = false
         private val requestSyncFrame: () -> Unit = {
@@ -504,6 +532,10 @@ class CarlifeConnectService : Service() {
             encoder.setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
                 override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                    if (closed) return
+                    val width = format.visibleDimension(MediaFormat.KEY_WIDTH, MediaFormat.KEY_CROP_LEFT, MediaFormat.KEY_CROP_RIGHT)
+                    val height = format.visibleDimension(MediaFormat.KEY_HEIGHT, MediaFormat.KEY_CROP_TOP, MediaFormat.KEY_CROP_BOTTOM)
+                    mutableState.update { it.copy(outputWidth = width, outputHeight = height) }
                     val sps = format.getByteBuffer("csd-0") ?: return
                     readConfiguration(sps, format.getByteBuffer("csd-1"))
                 }
@@ -527,11 +559,10 @@ class CarlifeConnectService : Service() {
                     if (info.size <= 0 || info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) return
                     frames++
                     bytes += info.size
-                    if (frames == 1L) Log.i(TAG, "First H.264 frame, ${info.size} bytes")
-                    val now = SystemClock.elapsedRealtime()
-                    if (frames == 1L || now - publishedAtMs >= 500) {
+                    if (frames == 1L) {
+                        Log.i(TAG, "First H.264 frame, ${info.size} bytes")
                         worker.removeCallbacks(timeout)
-                        publishFrames(now)
+                        mutableState.update { it.copy(phase = CapturePhase.RECEIVING, frames = frames, bytes = bytes) }
                     }
                 }
             }, worker)
@@ -539,6 +570,8 @@ class CarlifeConnectService : Service() {
             val inputSurface = encoder.createInputSurface()
             surface = inputSurface
             encoder.start()
+            sampledAtMs = SystemClock.elapsedRealtime()
+            worker.postDelayed(sampleOutput, OUTPUT_SAMPLE_MS)
             keyFrameSink = requestSyncFrame
             return inputSurface
         }
@@ -579,9 +612,11 @@ class CarlifeConnectService : Service() {
             }
         }
 
-        private fun publishFrames(now: Long) {
-            publishedAtMs = now
-            mutableState.update { it.copy(phase = CapturePhase.RECEIVING, frames = frames, bytes = bytes) }
+        private fun MediaFormat.visibleDimension(size: String, start: String, end: String): Int? {
+            if (containsKey(start) && containsKey(end)) {
+                return (getInteger(end) - getInteger(start) + 1).takeIf { it > 0 }
+            }
+            return if (containsKey(size)) getInteger(size).takeIf { it > 0 } else null
         }
 
         fun fail(message: String) {
@@ -601,6 +636,7 @@ class CarlifeConnectService : Service() {
             if (remoteKeySink === keySink) remoteKeySink = null
             keyListener = null
             worker.removeCallbacks(timeout)
+            worker.removeCallbacks(sampleOutput)
             try {
                 manager?.stopCast()
             } catch (_: RemoteException) {
@@ -610,8 +646,11 @@ class CarlifeConnectService : Service() {
                 runCatching { codec?.release() }
                 surface?.release()
                 mutableState.update {
-                    if (it.phase == CapturePhase.FAILED) it else
-                        it.copy(phase = CapturePhase.STOPPED, frames = frames, bytes = bytes)
+                    it.copy(
+                        phase = if (it.phase == CapturePhase.FAILED) CapturePhase.FAILED else CapturePhase.STOPPED,
+                        frames = frames, bytes = bytes, outputFps = null, outputMbps = null,
+                        outputWidth = null, outputHeight = null, displayId = null,
+                    )
                 }
             }
         }
@@ -633,6 +672,9 @@ class CarlifeConnectService : Service() {
         private const val ARMED_AT = "elapsed_ms"
         private const val ARMED_AT_WALL = "wall_ms"
         private const val DPI = 160
+        private const val OUTPUT_SAMPLE_MS = 1_000L
+        private val mutableReceiverDiagnostics = MutableStateFlow(ReceiverDiagnostics())
+        internal val receiverDiagnostics = mutableReceiverDiagnostics.asStateFlow()
         private val mutableState = MutableStateFlow(CaptureStatus())
         val state = mutableState.asStateFlow()
 
@@ -715,6 +757,10 @@ data class CaptureStatus(
     val avcKeyFrameBytes: Int? = null,
     val error: String? = null,
     val receiverStatus: String? = null,
+    val outputWidth: Int? = null,
+    val outputHeight: Int? = null,
+    val outputFps: Double? = null,
+    val outputMbps: Double? = null,
 ) {
     val active: Boolean
         get() = phase.isActive

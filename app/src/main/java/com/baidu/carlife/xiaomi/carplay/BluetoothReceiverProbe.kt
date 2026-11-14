@@ -13,6 +13,11 @@ import java.io.Closeable
 import java.io.IOException
 import java.util.UUID
 
+internal data class ReceiverDiagnostics(
+    val resolution: CarPlayResolution? = null,
+    val wifi: ReceiverWifi? = null,
+)
+
 internal class BluetoothReceiverProbe(
     private val connectivity: ConnectivityManager,
 ) : Closeable {
@@ -30,6 +35,7 @@ internal class BluetoothReceiverProbe(
         onStreamStarted: () -> Unit,
         receiverAddress: String = "",
         onResolution: (CarPlayResolution) -> Unit = {},
+        onDiagnostics: (ReceiverDiagnostics) -> Unit = {},
         onStage: (String) -> Unit,
     ) {
         try {
@@ -42,13 +48,14 @@ internal class BluetoothReceiverProbe(
                     runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, receiverAddress, {
                         streamed = true
                         onStreamStarted()
-                    }, onResolution, onStage)
+                    }, onResolution, onDiagnostics, onStage)
                 } catch (error: IOException) {
                     if (closed) return
                     if (!captureReady() || (!streamed && SystemClock.elapsedRealtime() >= reconnectUntil)) throw error
                     onStage("投屏连接已断开 · 等待接收端重新连接")
                 } finally {
                     closeAttempt()
+                    onDiagnostics(ReceiverDiagnostics())
                 }
                 if (!captureReady()) break
                 if (streamed) reconnectUntil = SystemClock.elapsedRealtime() + 90_000
@@ -69,6 +76,7 @@ internal class BluetoothReceiverProbe(
         receiverAddress: String,
         onStreamStarted: () -> Unit,
         onResolution: (CarPlayResolution) -> Unit,
+        onDiagnostics: (ReceiverDiagnostics) -> Unit,
         onStage: (String) -> Unit,
     ) {
         val attempt = CarPlaySockets()
@@ -96,6 +104,13 @@ internal class BluetoothReceiverProbe(
         }
         onStage("蓝牙 RFCOMM 已连接")
         var accessPoint: ReceiverWifiRequest? = null
+        var diagnostics = ReceiverDiagnostics()
+        fun publishWifi(wifi: ReceiverWifi) {
+            if (diagnostics.wifi !== wifi) {
+                diagnostics = diagnostics.copy(wifi = wifi)
+                onDiagnostics(diagnostics)
+            }
+        }
         fun requestWifi(wifi: ReceiverWifi) {
             if (pin.isEmpty() || Build.VERSION.SDK_INT < 29 || accessPoint != null) return
             onStage("正在连接车机 Wi-Fi · 如有系统提示，请确认")
@@ -107,7 +122,11 @@ internal class BluetoothReceiverProbe(
                 accessPoint = request
             }
         }
-        val endpoint = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, ::requestWifi, onStage)
+        val endpoint = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, { wifi ->
+            publishWifi(wifi)
+            requestWifi(wifi)
+        }, onStage)
+        endpoint.wifi?.let(::publishWifi)
         if (pin.isNotEmpty()) {
             endpoint.wifi?.let(::requestWifi)
             if (Build.VERSION.SDK_INT >= 29) accessPoint?.let { request ->
@@ -116,7 +135,13 @@ internal class BluetoothReceiverProbe(
                 onStage("已连接车机 Wi-Fi")
             }
             onStage(CarPlayReceiverProbe.verify(
-                endpoint.host, endpoint.port, pin, endpoint.certificate, deviceId, attempt, onStreamStarted, onResolution, onStage,
+                endpoint.host, endpoint.port, pin, endpoint.certificate, deviceId, attempt, onStreamStarted,
+                onResolution = { resolution ->
+                    diagnostics = diagnostics.copy(resolution = resolution)
+                    onDiagnostics(diagnostics)
+                    onResolution(resolution)
+                },
+                onStage = onStage,
             ))
         }
     }
