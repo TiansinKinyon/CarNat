@@ -1,6 +1,9 @@
 package com.baidu.carlife.xiaomi.ui.projection
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothManager
+import android.content.Context
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
@@ -10,12 +13,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
@@ -44,8 +51,13 @@ internal fun ProjectionScreen(modifier: Modifier = Modifier) {
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
     var showCustomCode by remember { mutableStateOf(settings.pin.isNotBlank()) }
     var error by remember { mutableStateOf<String?>(null) }
+    var devices by remember { mutableStateOf<List<PairedReceiver>?>(null) }
+    var expanded by remember { mutableStateOf(false) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) error = startProjection(context, settings)
+        if (granted) {
+            devices = pairedReceivers(context)
+            expanded = true
+        }
         else error = "投屏需要附近设备权限"
     }
     ProjectionContent(
@@ -55,6 +67,27 @@ internal fun ProjectionScreen(modifier: Modifier = Modifier) {
         showCustomCode = showCustomCode,
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
+        receiverPicker = {
+            val selectedName = settings.name.takeIf { settings.receiverAddress.isNotEmpty() }.orEmpty()
+            ReceiverPicker(
+                selectedName, devices, expanded, onDismiss = { expanded = false },
+                onOpen = {
+                    error = null
+                    if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                        devices = pairedReceivers(context)
+                        expanded = true
+                    } else {
+                        permission.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                    }
+                },
+                onSelect = { device ->
+                    val updated = settings.copy(name = device.name, receiverAddress = device.address)
+                    if (updated.saveReceiver(context)) settings = updated
+                    else error = "无法保存接收端"
+                    expanded = false
+                },
+            )
+        },
         onSettingsChange = { settings = it },
         onToggleCustomCode = {
             showCustomCode = !showCustomCode
@@ -65,7 +98,11 @@ internal fun ProjectionScreen(modifier: Modifier = Modifier) {
             if (status.active) {
                 CarlifeConnectService.stopDiagnostic(context)
             } else if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                error = startProjection(context, settings)
+                val receiver = pairedReceivers(context)?.firstOrNull {
+                    it.address.equals(settings.receiverAddress, ignoreCase = true)
+                }
+                error = if (receiver == null) "请开启蓝牙并选择已配对的接收端"
+                else startProjection(context, settings.copy(name = receiver.name))
             } else {
                 permission.launch(Manifest.permission.BLUETOOTH_CONNECT)
             }
@@ -80,6 +117,7 @@ private fun ProjectionContent(
     showCustomCode: Boolean,
     error: String?,
     supported: Boolean,
+    receiverPicker: @Composable () -> Unit,
     onSettingsChange: (ReceiverSettings) -> Unit,
     onToggleCustomCode: () -> Unit,
     onProjectionClick: () -> Unit,
@@ -94,8 +132,7 @@ private fun ProjectionContent(
             Text("CarPlay 投屏需要 Android 13 或更新版本")
         } else {
             if (!status.active) {
-                OutlinedTextField(settings.name, { onSettingsChange(settings.copy(name = it)) },
-                    label = { Text("接收端蓝牙名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                receiverPicker()
                 OutlinedTextField(settings.address, { onSettingsChange(settings.copy(address = it)) },
                     label = { Text("本机蓝牙地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 TextButton(onClick = onToggleCustomCode) { Text(if (showCustomCode) "使用默认网络配对码" else "使用自定义网络配对码") }
@@ -105,7 +142,7 @@ private fun ProjectionContent(
                         singleLine = true, modifier = Modifier.fillMaxWidth())
                 }
             }
-            Button(enabled = status.active || settings.valid, onClick = onProjectionClick) { Text(if (status.active) "停止投屏" else "开始投屏") }
+            Button(enabled = status.active || (settings.valid && settings.receiverAddress.isNotBlank()), onClick = onProjectionClick) { Text(if (status.active) "停止投屏" else "开始投屏") }
             val message = error ?: status.error ?: status.receiverStatus ?: when (status.phase) {
                 CapturePhase.ARMED -> "正在启动 CarWith"
                 CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
@@ -156,13 +193,63 @@ internal fun ProjectionReadyPreviewContent() {
 private fun ProjectionPreviewContent(status: CaptureStatus) {
     ProjectionContent(
         status = status,
-        settings = ReceiverSettings(name = "CarPlay 接收端", address = "02:12:34:56:78:90"),
+        settings = ReceiverSettings(name = "CarPlay 接收端", address = "02:12:34:56:78:90", receiverAddress = "02:00:00:00:00:01"),
         showCustomCode = false,
         error = null,
         supported = true,
+        receiverPicker = { ReceiverPicker("CarPlay 接收端", emptyList(), false, {}, {}, {}) },
         onSettingsChange = {},
         onToggleCustomCode = {},
         onProjectionClick = {},
     )
 
+}
+
+private data class PairedReceiver(val name: String, val address: String)
+
+@SuppressLint("MissingPermission")
+private fun pairedReceivers(context: Context): List<PairedReceiver>? = try {
+    val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
+    if (adapter?.isEnabled != true) null
+    else adapter.bondedDevices.orEmpty().map {
+        PairedReceiver(it.name?.takeIf(String::isNotBlank) ?: "未命名设备", it.address)
+    }.sortedWith(compareBy({ it.name }, { it.address }))
+} catch (_: SecurityException) {
+    null
+}
+
+@Composable
+private fun ReceiverPicker(
+    selectedName: String,
+    devices: List<PairedReceiver>?,
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onOpen: () -> Unit,
+    onSelect: (PairedReceiver) -> Unit,
+) {
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth()) {
+            Text(selectedName.ifBlank { "选择已配对的蓝牙接收端" })
+            Text(" ▾")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+            if (devices.isNullOrEmpty()) {
+                DropdownMenuItem(
+                    text = { Text(if (devices == null) "请开启蓝牙并检查附近设备权限" else "请先在系统蓝牙设置中配对") },
+                    onClick = onDismiss,
+                )
+            }
+            devices.orEmpty().forEach { device ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(device.name)
+                            Text(device.address, style = MaterialTheme.typography.bodySmall)
+                        }
+                    },
+                    onClick = { onSelect(device) },
+                )
+            }
+        }
+    }
 }

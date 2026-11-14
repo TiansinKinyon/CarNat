@@ -23,6 +23,7 @@ internal class BluetoothReceiverProbe : Closeable {
         pin: String,
         deviceId: String,
         onStreamStarted: () -> Unit,
+        receiverAddress: String = "",
         onStage: (String) -> Unit,
     ) {
         try {
@@ -32,7 +33,7 @@ internal class BluetoothReceiverProbe : Closeable {
                 try {
                     val acceptTimeout = if (reconnectUntil == 0L) 30_000 else
                         (reconnectUntil - SystemClock.elapsedRealtime()).coerceIn(1L, 30_000L).toInt()
-                    runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, {
+                    runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, receiverAddress, {
                         streamed = true
                         onStreamStarted()
                     }, onStage)
@@ -59,6 +60,7 @@ internal class BluetoothReceiverProbe : Closeable {
         pin: String,
         deviceId: String,
         acceptTimeout: Int,
+        receiverAddress: String,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
     ) {
@@ -80,10 +82,10 @@ internal class BluetoothReceiverProbe : Closeable {
             server = null
         }
         val device = connection.remoteDevice
-        if (device.bondState != BluetoothDevice.BOND_BONDED ||
-            !device.name.equals(receiverName, ignoreCase = true)
-        ) {
-            throw IOException("忽略了与指定名称不符的蓝牙连接")
+        val matches = if (receiverAddress.isEmpty()) device.name.equals(receiverName, ignoreCase = true)
+        else device.address.equals(receiverAddress, ignoreCase = true)
+        if (device.bondState != BluetoothDevice.BOND_BONDED || !matches) {
+            throw IOException("忽略了来自其他蓝牙设备的连接")
         }
         onStage("蓝牙 RFCOMM 已连接")
         val endpoint = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, onStage)
