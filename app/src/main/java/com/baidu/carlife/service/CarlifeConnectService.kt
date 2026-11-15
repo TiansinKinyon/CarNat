@@ -39,6 +39,7 @@ import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
+import com.baidu.carlife.xiaomi.carplay.CarPlayDisplayChangedException
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
 import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
 import java.io.IOException
@@ -68,7 +69,8 @@ class CarlifeConnectService : Service() {
     private var stopping = false
 
     @android.annotation.SuppressLint("MissingPermission")
-    private fun startReceiver(capture: CaptureSession, readResolutionOnly: Boolean = false) {
+    private fun startReceiver(capture: CaptureSession, expectedResolution: CarPlayResolution? = null) {
+        val readResolutionOnly = expectedResolution == null
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         if (!settings.valid || adapter == null || missingReceiverPermissions(this).isNotEmpty()) {
@@ -96,14 +98,10 @@ class CarlifeConnectService : Service() {
                         receiverAddress = settings.receiverAddress,
                         readResolutionOnly = readResolutionOnly,
                         onResolution = { resolution ->
-                            if (readResolutionOnly) {
+                            if (expectedResolution == null) {
                                 probedResolution = resolution
-                            } else {
-                                projectionScope.launch {
-                                    if (receiverProbe !== probe) return@launch
-                                    settings.saveResolution(this@CarlifeConnectService, resolution)
-                                    worker.post { capture.configure(resolution) }
-                                }
+                            } else if (!expectedResolution.matchesEncoderSettings(resolution)) {
+                                throw CarPlayDisplayChangedException(resolution)
                             }
                         },
                         onDiagnostics = { diagnostics ->
@@ -122,21 +120,22 @@ class CarlifeConnectService : Service() {
                     throw IOException("CarPlay 接收端在画面开始前断开")
                 }
             } catch (failure: Exception) {
+                probedResolution = null
                 if (receiverProbe === probe) {
                     Log.i("CarNatIap2", "Receiver session ended", failure)
                     val message = failure.message ?: "投屏连接失败"
-                    if (streamed) mutableState.update { it.copy(receiverStatus = message) }
-                    else worker.post { capture.fail(message) }
+                    if (!streamed || failure is CarPlayDisplayChangedException) {
+                        worker.post { capture.fail(message) }
+                    } else {
+                        mutableState.update { it.copy(receiverStatus = message) }
+                    }
                 }
             } finally {
                 timeout.cancel()
                 if (receiverProbe === probe) {
                     receiverProbe = null
                     mutableReceiverDiagnostics.value = ReceiverDiagnostics()
-                    probedResolution?.let { resolution ->
-                        settings.saveResolution(this@CarlifeConnectService, resolution)
-                        prepareCarWithLaunch(resolution)
-                    }
+                    probedResolution?.let(::prepareCarWithLaunch)
                 }
             }
         }
@@ -202,12 +201,7 @@ class CarlifeConnectService : Service() {
                 mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
                 val capture = CaptureSession()
                 worker.post { session = capture }
-                val cachedResolution = ReceiverSettings.load(this).loadResolution(this)
-                if (cachedResolution == null) {
-                    startReceiver(capture, readResolutionOnly = true)
-                } else {
-                    prepareCarWithLaunch(cachedResolution)
-                }
+                startReceiver(capture)
             }
             return START_NOT_STICKY
         }
@@ -251,7 +245,7 @@ class CarlifeConnectService : Service() {
     }
 
     private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
-        val capture = CaptureSession(cachedResolution = resolution)
+        val capture = CaptureSession(resolution)
         main.removeCallbacks(armTimeout)
         mutableState.update {
             it.copy(
@@ -264,7 +258,7 @@ class CarlifeConnectService : Service() {
             session = capture
             capture.bind()
         }
-        startReceiver(capture)
+        startReceiver(capture, expectedResolution = resolution)
     }
 
     private fun failCarWithStartup(message: String) {
@@ -304,12 +298,8 @@ class CarlifeConnectService : Service() {
             .build()
     }
 
-    private inner class CaptureSession(private val cachedResolution: CarPlayResolution? = null) : ServiceConnection {
+    private inner class CaptureSession(private val resolution: CarPlayResolution? = null) : ServiceConnection {
         private var manager: ICarLifeCastManager? = null
-        private var resolution: CarPlayResolution? = null
-        private val prepareFromCache = Runnable {
-            if (resolution == null) cachedResolution?.let(::configure)
-        }
         private var codec: MediaCodec? = null
         private var surface: Surface? = null
         private var bound = false
@@ -520,10 +510,8 @@ class CarlifeConnectService : Service() {
             if (closed) return
             try {
                 bound = bindService(Intent().setComponent(CAR_WITH_SERVICE), this, BIND_AUTO_CREATE)
-                if (bound) {
-                    worker.postDelayed(timeout, 12_000)
-                    if (cachedResolution != null) worker.postDelayed(prepareFromCache, DISPLAY_REFRESH_TIMEOUT_MS)
-                } else fail("CarWith cast service is unavailable")
+                if (bound) worker.postDelayed(timeout, 12_000)
+                else fail("CarWith cast service is unavailable")
             } catch (error: SecurityException) {
                 fail(error.message ?: "CarWith denied the service binding")
             }
@@ -537,22 +525,6 @@ class CarlifeConnectService : Service() {
                 Log.i(TAG, "Bound to CarWith")
                 prepareCast()
             }
-        }
-
-        fun configure(size: CarPlayResolution) {
-            if (closed || resolution == size) return
-            worker.removeCallbacks(prepareFromCache)
-            val previous = resolution
-            if (codec != null && previous != null && (previous.width != size.width || previous.height != size.height)) {
-                fail("已更新车机分辨率为 ${size.width}×${size.height}，请重新开始投屏")
-                return
-            }
-            if (codec != null && previous?.frameRate != size.frameRate) {
-                fail("已更新车机帧率上限为 ${size.frameRate} fps，请重新开始投屏")
-                return
-            }
-            resolution = size
-            prepareCast()
         }
 
         private fun prepareCast() {
@@ -703,7 +675,6 @@ class CarlifeConnectService : Service() {
             keyListener = null
             worker.removeCallbacks(timeout)
             worker.removeCallbacks(sampleOutput)
-            worker.removeCallbacks(prepareFromCache)
             try {
                 manager?.stopCast()
             } catch (_: RemoteException) {
@@ -740,7 +711,6 @@ class CarlifeConnectService : Service() {
         private var launchResolution: CarPlayResolution? = null
         private const val DPI = 160
         private const val OUTPUT_SAMPLE_MS = 1_000L
-        private const val DISPLAY_REFRESH_TIMEOUT_MS = 8_000L
         private val mutableReceiverDiagnostics = MutableStateFlow(ReceiverDiagnostics())
         internal val receiverDiagnostics = mutableReceiverDiagnostics.asStateFlow()
         private val mutableState = MutableStateFlow(CaptureStatus())

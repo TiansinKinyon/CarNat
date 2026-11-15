@@ -52,6 +52,7 @@ internal class BluetoothReceiverProbe(
                     }, onResolution, onDiagnostics, readResolutionOnly, onStage)
                 } catch (error: IOException) {
                     if (closed) return
+                    if (error is CarPlayDisplayChangedException) throw error
                     if (!captureReady() || (!streamed && SystemClock.elapsedRealtime() >= reconnectUntil)) throw error
                     onStage("投屏连接已断开 · 等待接收端重新连接")
                 } finally {

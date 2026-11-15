@@ -9,27 +9,6 @@ internal data class ReceiverSettings(val name: String = "", val address: String 
     fun saveReceiver(context: Context): Boolean = preferences(context).edit()
         .putString("name", name).putString("receiverAddress", receiverAddress).commit()
 
-    private val resolutionKey: String
-        get() = "display_" + receiverAddress.uppercase(java.util.Locale.ROOT)
-
-    fun loadResolution(context: Context): CarPlayResolution? {
-        if (!CarPlayScreenProbe.bluetoothAddress.matches(receiverAddress)) return null
-        val values = preferences(context)
-        val width = values.getInt(resolutionKey + "_width", 0)
-        val height = values.getInt(resolutionKey + "_height", 0)
-        val maxFps = values.getInt(resolutionKey + "_max_fps", 0).takeIf { it > 0 }
-        return if (width > 0 && height > 0) CarPlayResolution(width, height, maxFps) else null
-    }
-
-    fun saveResolution(context: Context, resolution: CarPlayResolution) {
-        if (!CarPlayScreenProbe.bluetoothAddress.matches(receiverAddress) || loadResolution(context) == resolution) return
-        preferences(context).edit()
-            .putInt(resolutionKey + "_width", resolution.width)
-            .putInt(resolutionKey + "_height", resolution.height)
-            .putInt(resolutionKey + "_max_fps", resolution.maxFps ?: 0)
-            .commit()
-    }
-
     val networkPairingCode: String get() = pin.ifEmpty { "3939" }
 
     fun save(context: Context): Boolean = preferences(context).edit()

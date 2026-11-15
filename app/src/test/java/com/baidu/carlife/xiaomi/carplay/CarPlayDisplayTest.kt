@@ -4,6 +4,8 @@ import com.dd.plist.NSArray
 import com.dd.plist.NSDictionary
 import java.net.ProtocolException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CarPlayDisplayTest {
@@ -31,6 +33,14 @@ class CarPlayDisplayTest {
     fun defaultsToThirtyFpsWhenReceiverOmitsLimit() {
         val info = info(display("main", 1920, 766, 110))
         assertEquals(30, CarPlayDisplay.fromReceiverInfo(info).resolution.frameRate)
+    }
+
+    @Test
+    fun detectsEncoderSettingsChangesBetweenConnections() {
+        val initial = CarPlayResolution(1920, 766)
+        assertTrue(initial.matchesEncoderSettings(CarPlayResolution(1920, 766, 30)))
+        assertFalse(initial.matchesEncoderSettings(CarPlayResolution(1920, 766, 60)))
+        assertFalse(initial.matchesEncoderSettings(CarPlayResolution(1600, 1068, 30)))
     }
 
     @Test(expected = ProtocolException::class)
