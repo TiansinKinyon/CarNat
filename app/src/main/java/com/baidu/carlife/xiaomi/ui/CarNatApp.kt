@@ -130,12 +130,14 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
         }
         SettingEntry.entries.forEach { setting ->
             composable(setting.route) { entry ->
-                NavigationPage(
-                    entry = entry,
-                    title = setting.title,
-                    onBack = { navController.popBackStack() },
-                ) { active ->
-                    DeveloperSettingsScreen(active)
+                DeveloperSettingsScreen { actions, body ->
+                    NavigationPage(
+                        entry = entry,
+                        title = setting.title,
+                        onBack = { navController.popBackStack() },
+                        topBarActions = actions,
+                        content = body,
+                    )
                 }
             }
         }
@@ -153,6 +155,7 @@ private fun AnimatedVisibilityScope.NavigationPage(
     selectedDestination: Destination? = null,
     onNavigate: (Destination) -> Unit = {},
     onBack: (() -> Unit)? = null,
+    topBarActions: @Composable (Boolean) -> Unit = {},
     content: @Composable (Boolean) -> Unit = {},
 ) {
     val lifecycleState by entry.lifecycle.currentStateAsState()
@@ -191,6 +194,7 @@ private fun AnimatedVisibilityScope.NavigationPage(
                 topBar = {
                     TopAppBar(
                         title = { Text(title) },
+                        actions = { topBarActions(active) },
                         colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = MaterialTheme.colorScheme.surfaceContainer,
                         ),
