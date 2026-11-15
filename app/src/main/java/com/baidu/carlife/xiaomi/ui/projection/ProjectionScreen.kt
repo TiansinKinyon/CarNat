@@ -4,9 +4,6 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.content.Context
-import android.content.ActivityNotFoundException
-import android.content.ComponentName
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -164,7 +161,9 @@ private fun ProjectionContent(
             }
             Button(enabled = status.active || (settings.valid && settings.receiverAddress.isNotBlank()), onClick = onProjectionClick) { Text(if (status.active) "停止投屏" else "开始投屏") }
             val message = error ?: status.error ?: status.receiverStatus ?: when (status.phase) {
-                CapturePhase.ARMED -> "正在启动 CarWith"
+                CapturePhase.WAITING_FOR_RECEIVER -> "正在等待车机 CarPlay 连接"
+            CapturePhase.READY_TO_START_CAR_WITH -> "车机已就绪，返回 CarNat 即可启动 CarWith"
+            CapturePhase.ARMED -> "正在启动 CarWith"
                 CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
                 CapturePhase.STOPPED -> "投屏已停止"
                 else -> null
@@ -176,18 +175,8 @@ private fun ProjectionContent(
 
 private fun startProjection(context: Context, settings: ReceiverSettings): String? {
     if (!settings.valid || !settings.save(context)) return "无法保存接收端设置"
-    val entry = ComponentName("com.miui.carlink", "com.miui.carlink.castfwk.usb.CarlifeAdbActivity")
     CarlifeConnectService.startDiagnostic(context)
-    return try {
-        context.startActivity(Intent().setComponent(entry))
-        null
-    } catch (_: ActivityNotFoundException) {
-        CarlifeConnectService.stopDiagnostic(context)
-        "当前 CarWith 版本没有公开启动入口"
-    } catch (_: SecurityException) {
-        CarlifeConnectService.stopDiagnostic(context)
-        "CarWith 未开放投屏启动入口"
-    }
+    return null
 }
 
 @Preview(name = "待连接", showBackground = true, widthDp = 360)

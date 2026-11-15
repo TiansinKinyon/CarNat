@@ -2,6 +2,7 @@ package com.baidu.carlife.xiaomi.carplay
 
 import android.os.Build
 import android.os.SystemClock
+import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CarlifeConnectService
 import com.dd.plist.BinaryPropertyListParser
 import com.dd.plist.BinaryPropertyListWriter
@@ -22,7 +23,7 @@ internal object CarPlayScreenProbe {
     val bluetoothAddress = Regex("(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
     private val plistHeaders = mapOf("Content-Type" to "application/x-apple-binary-plist")
     private const val MAIN_SCREEN = CarPlayDisplay.MAIN_SCREEN
-    private const val FIRST_FRAME_TIMEOUT_MS = 8_000L
+    private const val FIRST_KEY_FRAME_TIMEOUT_MS = 8_000L
 
     fun run(
         host: InetAddress,
@@ -73,7 +74,6 @@ internal object CarPlayScreenProbe {
                 (it.objectForKey("type") as? NSNumber)?.longValue() == MAIN_SCREEN.toLong()
             } ?: throw ProtocolException("接收端未返回主屏流")
             val dataPort = port(screen, "dataPort")
-            onResolution(resolution)
             connect(sockets, host, dataPort).use { video ->
                 openAudio(receiverInfo, host, control, keys, sockets, navigation = false).use { audio ->
                     openAudio(receiverInfo, host, control, keys, sockets, navigation = true).use { navigation ->
@@ -83,6 +83,7 @@ internal object CarPlayScreenProbe {
                         val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
                         if (!CarlifeConnectService.state.value.active) return connected
                         onStage(connected)
+                        onResolution(resolution)
                         val heartbeat = Thread({
                         try {
                             while (!video.isClosed) {
@@ -179,8 +180,8 @@ internal object CarPlayScreenProbe {
         try {
             CarlifeConnectService.requestKeyFrame()
             val writer = CarPlayVideoWriter(video.getOutputStream(), key)
-            val firstFrameDeadline = SystemClock.elapsedRealtime() + FIRST_FRAME_TIMEOUT_MS
             var frames = 0
+            var keyFrameDeadline = Long.MAX_VALUE
             var sentBytes = 0L
             var longestWriteMs = 0L
             var nextKeepAlive = SystemClock.elapsedRealtime() + 1_000
@@ -189,8 +190,9 @@ internal object CarPlayScreenProbe {
             var firstNtp = 0L
             while (!video.isClosed && CarlifeConnectService.state.value.active) {
                 val now = SystemClock.elapsedRealtime()
-                if (frames == 0 && now >= firstFrameDeadline) {
-                    throw ProtocolException("CarWith 未提供可发送的视频关键帧")
+                if (frames == 0 && CarlifeConnectService.state.value.phase == CapturePhase.RECEIVING) {
+                    if (keyFrameDeadline == Long.MAX_VALUE) keyFrameDeadline = now + FIRST_KEY_FRAME_TIMEOUT_MS
+                    if (now >= keyFrameDeadline) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
                 }
                 if (now >= nextKeepAlive) {
                     writer.writeKeepAlive()

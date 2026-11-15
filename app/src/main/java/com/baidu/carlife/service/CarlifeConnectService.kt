@@ -41,6 +41,7 @@ import com.baidu.carlife.xiaomi.carplay.AvcPayload
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
 import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.UUID
 import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
@@ -64,6 +65,8 @@ class CarlifeConnectService : Service() {
     private val projectionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var receiverProbe: BluetoothReceiverProbe? = null
     private var receiverJob: Job? = null
+    private var negotiatedResolution: CarPlayResolution? = null
+    private var stopping = false
 
     @android.annotation.SuppressLint("MissingPermission")
     private fun startReceiver(capture: CaptureSession) {
@@ -91,7 +94,27 @@ class CarlifeConnectService : Service() {
                             timeout.cancel()
                         },
                         receiverAddress = settings.receiverAddress,
-                        onResolution = { resolution -> worker.post { capture.configure(resolution) } },
+                        onResolution = { resolution ->
+                            projectionScope.launch {
+                                if (receiverProbe !== probe) return@launch
+                                when (mutableState.value.phase) {
+                                    CapturePhase.WAITING_FOR_RECEIVER -> {
+                                        negotiatedResolution = resolution
+                                        timeout.cancel()
+                                        main.postDelayed(armTimeout, CAR_WITH_START_TIMEOUT_MS)
+                                        mutableState.update {
+                                            it.copy(
+                                                phase = CapturePhase.READY_TO_START_CAR_WITH,
+                                                receiverStatus = "车机已就绪，返回 CarNat 即可启动 CarWith",
+                                            )
+                                        }
+                                    }
+                                    CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES, CapturePhase.RECEIVING ->
+                                        worker.post { capture.configure(resolution) }
+                                    else -> Unit
+                                }
+                            }
+                        },
                         onDiagnostics = { diagnostics ->
                             projectionScope.launch {
                                 if (receiverProbe === probe) mutableReceiverDiagnostics.value = diagnostics
@@ -103,6 +126,9 @@ class CarlifeConnectService : Service() {
                             if (receiverProbe === probe) mutableState.update { it.copy(receiverStatus = stage) }
                         }
                     }
+                }
+                if (!streamed && receiverProbe === probe) {
+                    throw IOException("CarPlay 接收端在画面开始前断开")
                 }
             } catch (failure: Exception) {
                 if (receiverProbe === probe) {
@@ -124,6 +150,8 @@ class CarlifeConnectService : Service() {
     private fun stopReceiver() {
         receiverProbe?.close()
         receiverProbe = null
+        negotiatedResolution = null
+        main.removeCallbacks(armTimeout)
         mutableReceiverDiagnostics.value = ReceiverDiagnostics()
         receiverJob?.cancel()
         receiverJob = null
@@ -133,13 +161,12 @@ class CarlifeConnectService : Service() {
     private var session: CaptureSession? = null
     private val main = Handler(Looper.getMainLooper())
     private val armTimeout = Runnable {
-        if (mutableState.value.phase == CapturePhase.ARMED) {
-            clearArm(this)
-            val message = "CarWith did not start its CarLife component"
-            Log.w(TAG, message)
-            mutableState.value = CaptureStatus(phase = CapturePhase.FAILED, error = message)
-            stopSelf()
+        val message = when (mutableState.value.phase) {
+            CapturePhase.READY_TO_START_CAR_WITH -> "等待打开 CarWith 超时"
+            CapturePhase.ARMED -> "CarWith 未启动 CarLife 组件"
+            else -> return@Runnable
         }
+        failCarWithStartup(message)
     }
 
     override fun onCreate() {
@@ -152,36 +179,39 @@ class CarlifeConnectService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == stopToken) {
+            stopping = true
             stopReceiver()
-            main.removeCallbacks(armTimeout)
-            clearArm(this)
             mutableState.update {
-                if (it.phase == CapturePhase.ARMED) it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) else it
+                when (it.phase) {
+                    CapturePhase.WAITING_FOR_RECEIVER, CapturePhase.READY_TO_START_CAR_WITH, CapturePhase.ARMED ->
+                        it.copy(phase = CapturePhase.STOPPED, receiverStatus = null)
+                    else -> it
+                }
             }
             worker.post {
                 session?.finish()
                 session = null
-                mutableState.update { it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) }
                 main.post {
+                    stopping = false
+                    mutableState.update { it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) }
                     if (stopSelfResult(startId)) stopForeground(STOP_FOREGROUND_REMOVE)
                 }
             }
             return START_NOT_STICKY
         }
         if (intent?.action == diagnosticToken) {
-            if (!mutableState.value.active) {
+            if (!stopping && !mutableState.value.active) {
                 startForeground(NOTIFICATION_ID, diagnosticNotification())
-                recordArm(this)
-                mutableState.value = CaptureStatus(phase = CapturePhase.ARMED)
-                Log.i(TAG, "Armed for CarWith's CarLife start")
-                main.postDelayed(armTimeout, ARM_WINDOW_MS)
+                mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
+                val capture = CaptureSession()
+                worker.post { session = capture }
+                startReceiver(capture)
             }
             return START_NOT_STICKY
         }
-        if (intent?.action == captureToken) {
-            if (mutableState.value.phase == CapturePhase.ARMED && mutableState.value.setupReady) {
-                Log.i(TAG, "User requested capture after CarWith setup")
-                beginCapture(null)
+        if (intent?.action == launchFailedToken) {
+            if (mutableState.value.phase == CapturePhase.ARMED) {
+                failCarWithStartup(intent.getStringExtra("error") ?: "无法打开 CarWith")
             }
             return START_NOT_STICKY
         }
@@ -190,14 +220,13 @@ class CarlifeConnectService : Service() {
         val carWithRequest = intent != null &&
             intent.getStringExtra("bindPackageName") == CAR_WITH_SERVICE.packageName &&
             intent.getStringExtra("bindClassName") == CAR_WITH_SERVICE.className
-        val phase = mutableState.value.phase
-        if (intent != null && carWithRequest &&
-            (phase == CapturePhase.ARMED || (!phase.isActive && hasValidArm(this)))
+        val resolution = negotiatedResolution
+        if (intent != null && carWithRequest && resolution != null && receiverProbe != null &&
+            mutableState.value.phase == CapturePhase.ARMED
         ) {
-            startForeground(NOTIFICATION_ID, diagnosticNotification())
             val connectionType = intent.getIntExtra("usb_type", -1)
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
-            beginCapture(connectionType)
+            beginCapture(connectionType, resolution)
         } else if (!mutableState.value.active) {
             // Even a declined external start must satisfy startForegroundService's contract.
             startForeground(NOTIFICATION_ID, diagnosticNotification())
@@ -206,25 +235,30 @@ class CarlifeConnectService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun beginCapture(connectionType: Int?) {
-        clearArm(this)
+    private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
         main.removeCallbacks(armTimeout)
-        mutableState.update { it.copy(phase = CapturePhase.BINDING, connectionType = connectionType) }
-        val capture = CaptureSession()
+        mutableState.update {
+            it.copy(
+                phase = CapturePhase.BINDING,
+                connectionType = connectionType,
+                receiverStatus = "正在准备 CarWith 画面",
+            )
+        }
         worker.post {
-            session = capture
+            val capture = session ?: return@post
+            capture.configure(resolution)
             capture.bind()
         }
-        startReceiver(capture)
+    }
+
+    private fun failCarWithStartup(message: String) {
+        stopReceiver()
+        worker.post { session?.fail(message) }
     }
 
     override fun onDestroy() {
         stopReceiver()
         projectionScope.cancel()
-        main.removeCallbacks(armTimeout)
-        mutableState.update {
-            if (it.phase == CapturePhase.ARMED) it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) else it
-        }
         worker.post {
             session?.finish()
             thread.quitSafely()
@@ -463,6 +497,7 @@ class CarlifeConnectService : Service() {
         }
 
         fun bind() {
+            if (closed) return
             try {
                 bound = bindService(Intent().setComponent(CAR_WITH_SERVICE), this, BIND_AUTO_CREATE)
                 if (bound) worker.postDelayed(timeout, 12_000)
@@ -662,15 +697,12 @@ class CarlifeConnectService : Service() {
             "com.xiaomi.ucar.carlife.CarlifeConnService",
         )
         private val diagnosticToken = UUID.randomUUID().toString()
-        private val captureToken = UUID.randomUUID().toString()
+        private val launchFailedToken = UUID.randomUUID().toString()
         private val stopToken = UUID.randomUUID().toString()
         private const val TAG = "CarNatCapture"
         private const val CHANNEL_ID = "carwith_diagnostics"
         private const val NOTIFICATION_ID = 1
-        private const val ARM_WINDOW_MS = 90_000L
-        private const val ARM_PREFERENCES = "capture_opt_in"
-        private const val ARMED_AT = "elapsed_ms"
-        private const val ARMED_AT_WALL = "wall_ms"
+        private const val CAR_WITH_START_TIMEOUT_MS = 90_000L
         private const val DPI = 160
         private const val OUTPUT_SAMPLE_MS = 1_000L
         private val mutableReceiverDiagnostics = MutableStateFlow(ReceiverDiagnostics())
@@ -709,33 +741,21 @@ class CarlifeConnectService : Service() {
             context.startService(Intent(context, CarlifeConnectService::class.java).setAction(stopToken))
         }
 
-        private fun recordArm(context: Context) {
-            context.getSharedPreferences(ARM_PREFERENCES, MODE_PRIVATE).edit()
-                .putLong(ARMED_AT, SystemClock.elapsedRealtime())
-                .putLong(ARMED_AT_WALL, System.currentTimeMillis())
-                .commit()
+        internal fun claimCarWithLaunch(): Boolean {
+            val awaitingLaunch = mutableState.value
+            return awaitingLaunch.phase == CapturePhase.READY_TO_START_CAR_WITH &&
+                mutableState.compareAndSet(
+                    awaitingLaunch,
+                    awaitingLaunch.copy(phase = CapturePhase.ARMED, receiverStatus = "正在启动 CarWith"),
+                )
         }
 
-        private fun hasValidArm(context: Context): Boolean {
-            val preferences = context.getSharedPreferences(ARM_PREFERENCES, MODE_PRIVATE)
-            val elapsedAge = SystemClock.elapsedRealtime() - preferences.getLong(ARMED_AT, 0)
-            val wallAge = System.currentTimeMillis() - preferences.getLong(ARMED_AT_WALL, 0)
-            return elapsedAge in 0 until ARM_WINDOW_MS && wallAge in 0 until ARM_WINDOW_MS
-        }
-
-        private fun clearArm(context: Context) {
-            context.getSharedPreferences(ARM_PREFERENCES, MODE_PRIVATE).edit()
-                .remove(ARMED_AT)
-                .remove(ARMED_AT_WALL)
-                .commit()
-        }
-
-        fun markSetupReady() {
-            mutableState.update { it.copy(setupReady = true) }
-        }
-
-        fun captureAfterSetup(context: Context) {
-            context.startService(Intent(context, CarlifeConnectService::class.java).setAction(captureToken))
+        internal fun reportCarWithLaunchFailure(context: Context, message: String) {
+            context.startService(
+                Intent(context, CarlifeConnectService::class.java)
+                    .setAction(launchFailedToken)
+                    .putExtra("error", message),
+            )
         }
     }
 }
@@ -743,12 +763,12 @@ class CarlifeConnectService : Service() {
 internal data class RemoteContact(val id: Int, val x: Float, val y: Float, val down: Boolean)
 
 enum class CapturePhase(val isActive: Boolean = false) {
-    IDLE, ARMED(true), BINDING(true), WAITING_FOR_FRAMES(true), RECEIVING(true), STOPPED, FAILED
+    IDLE, WAITING_FOR_RECEIVER(true), READY_TO_START_CAR_WITH(true), ARMED(true),
+    BINDING(true), WAITING_FOR_FRAMES(true), RECEIVING(true), STOPPED, FAILED
 }
 
 data class CaptureStatus(
     val phase: CapturePhase = CapturePhase.IDLE,
-    val setupReady: Boolean = false,
     val connectionType: Int? = null,
     val displayId: Int? = null,
     val frames: Long = 0,
