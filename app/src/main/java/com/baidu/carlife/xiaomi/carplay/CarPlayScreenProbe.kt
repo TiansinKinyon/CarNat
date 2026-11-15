@@ -4,6 +4,7 @@ import android.os.Build
 import android.os.SystemClock
 import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import com.dd.plist.BinaryPropertyListParser
 import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSArray
@@ -182,7 +183,9 @@ internal object CarPlayScreenProbe {
             sockets.openDatagram(), host, dataPort, keys.video(id), rate, aac,
             stream = if (navigation) 2 else 1, outputChannels = channels,
         ).also {
-            onAudio(navigation, CarPlayAudioInfo(if (aac) "AAC-LC" else "PCM", rate, channels, bufferMs, dataPort))
+            val codec = if (aac) "AAC-LC" else "PCM"
+            ProjectionLog.event("音频协商成功 · $audioType · $codec · $rate Hz · ${channels} 声道 · ${bufferMs} ms")
+            onAudio(navigation, CarPlayAudioInfo(codec, rate, channels, bufferMs, dataPort))
         }
     }
 

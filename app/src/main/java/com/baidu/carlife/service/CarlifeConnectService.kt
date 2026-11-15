@@ -40,6 +40,7 @@ import com.baidu.carlife.mixing.aidl.IRemoteKeyListener
 import com.baidu.carlife.mixing.aidl.IRemoteTouchListener
 import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
+import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
@@ -79,6 +80,7 @@ class CarlifeConnectService : Service() {
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         if (!settings.valid || adapter == null || missingReceiverPermissions(this).isNotEmpty()) {
+            ProjectionLog.event("接收端设置无效、蓝牙不可用或缺少附近设备权限")
             worker.post { capture.fail("请检查接收端设置和附近设备权限") }
             return
         }
@@ -86,6 +88,7 @@ class CarlifeConnectService : Service() {
         receiverProbe = probe
         val timeout = projectionScope.launch {
             delay(RECEIVER_CONNECT_TIMEOUT_MS)
+            ProjectionLog.event("等待 CarPlay 连接超时")
             stopReceiver()
             worker.post { capture.fail("等待 CarPlay 接收端超时") }
         }
@@ -145,6 +148,7 @@ class CarlifeConnectService : Service() {
                             }
                         },
                     ) { stage ->
+                        ProjectionLog.stage(stage)
                         Log.i("CarNatIap2", stage)
                         projectionScope.launch {
                             if (receiverProbe === probe) mutableState.update { it.copy(receiverStatus = stage) }
@@ -157,6 +161,7 @@ class CarlifeConnectService : Service() {
             } catch (failure: Exception) {
                 probedResolution = null
                 if (receiverProbe === probe) {
+                    ProjectionLog.failure("车机会话结束", failure)
                     Log.i("CarNatIap2", "Receiver session ended", failure)
                     val message = failure.message ?: "投屏连接失败"
                     if (!streamed) {
@@ -223,6 +228,7 @@ class CarlifeConnectService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == stopToken) {
+            ProjectionLog.event("用户停止投屏")
             clearLaunchTicket(this)
             stopping = true
             stopReceiver()
@@ -250,11 +256,13 @@ class CarlifeConnectService : Service() {
             if (!stopping && !mutableState.value.active) {
                 clearLaunchTicket(this)
                 startForeground(NOTIFICATION_ID, projectionNotification())
+                ProjectionLog.event("用户开始投屏")
                 mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
                 val capture = CaptureSession()
                 worker.post { session = capture }
                 val manualMode = ProjectionPreferences.load(this).manualDisplayMode
                 if (manualMode != null) {
+                    ProjectionLog.event("手动分辨率和帧率，跳过车机预连接")
                     Log.i(TAG, "Using a manual display mode; starting CarWith before the receiver connection")
                     prepareCarWithLaunch(manualMode)
                 } else {
@@ -281,6 +289,7 @@ class CarlifeConnectService : Service() {
         if (intent != null && resolution != null) {
             startForeground(NOTIFICATION_ID, projectionNotification())
             val connectionType = intent.getIntExtra("usb_type", -1)
+            ProjectionLog.event("CarWith 启动组件 · usb_type=$connectionType")
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
             showConnectingNotification()
             beginCapture(connectionType, resolution)
@@ -293,6 +302,7 @@ class CarlifeConnectService : Service() {
     }
 
     private fun prepareCarWithLaunch(resolution: CarPlayResolution) {
+        ProjectionLog.event("投屏参数已就绪 · ${resolution.width}×${resolution.height} / ${resolution.frameRate} fps")
         launchResolution = resolution
         main.postDelayed(armTimeout, CAR_WITH_START_TIMEOUT_MS)
         mutableState.update {
@@ -325,6 +335,7 @@ class CarlifeConnectService : Service() {
     }
 
     private fun failCarWithStartup(message: String) {
+        ProjectionLog.event("CarWith 接管失败")
         clearLaunchTicket(this)
         stopReceiver()
         worker.post { session?.fail(message) }
@@ -533,6 +544,7 @@ class CarlifeConnectService : Service() {
                 mutableState.value.displayId == null -> "CarWith did not return onCastPrepared"
                 else -> "CarWith prepared a display but no encoded frame arrived"
             }
+            ProjectionLog.event(message)
             fail(message)
         }
 
@@ -627,6 +639,7 @@ class CarlifeConnectService : Service() {
                 if (closed) return@post
                 manager = ICarLifeCastManager.Stub.asInterface(binder)
                 worker.removeCallbacks(timeout)
+                ProjectionLog.event("已绑定 CarWith 投屏服务")
                 Log.i(TAG, "Bound to CarWith")
                 prepareCast()
             }
@@ -645,6 +658,7 @@ class CarlifeConnectService : Service() {
                 remote.prepareCast(CastConfig(size.width, size.height, DPI, inputSurface))
                 Log.i(TAG, "CarWith prepareCast: ${size.width}×${size.height}")
             } catch (error: Exception) {
+                ProjectionLog.failure("CarWith 投屏初始化失败", error)
                 Log.w(TAG, "CarWith setup failed for ${size.width}×${size.height}", error)
                 fail("无法以 ${size.width}×${size.height} 启动 CarWith 投屏")
             }
@@ -684,7 +698,10 @@ class CarlifeConnectService : Service() {
                 }
 
                 override fun onError(codec: MediaCodec, error: MediaCodec.CodecException) {
-                    if (!closed) fail(error.diagnosticInfo)
+                    if (!closed) {
+                        ProjectionLog.failure("视频编码器异常", error)
+                        fail(error.diagnosticInfo)
+                    }
                 }
 
                 override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
@@ -705,6 +722,7 @@ class CarlifeConnectService : Service() {
                     if (frames == 1L) {
                         Log.i(TAG, "First H.264 frame, ${info.size} bytes")
                         worker.removeCallbacks(timeout)
+                        ProjectionLog.event("CarWith 首个编码帧已输出")
                         mutableState.update { it.copy(phase = CapturePhase.RECEIVING, frames = frames, bytes = bytes) }
                     }
                 }

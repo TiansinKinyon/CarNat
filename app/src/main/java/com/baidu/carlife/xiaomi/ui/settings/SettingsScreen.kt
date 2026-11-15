@@ -66,6 +66,7 @@ import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 import kotlin.math.roundToInt
 
 internal enum class SettingEntry(val route: String, val title: String) {
+    LOGS("settings/logs", "投屏日志"),
     DEVELOPER("settings/developer", "开发者选项"),
 }
 
@@ -120,6 +121,10 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
         }
         if (error) SaveError()
         SettingsCard {
+            SettingsRow("投屏日志", "查看与导出", active, false, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_info), contentDescription = null)
+            }) { onOpen(SettingEntry.LOGS) }
+            SettingsDivider()
             SettingsRow("开发者选项", "网络配对码", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_code_xml), contentDescription = null) }) { onOpen(SettingEntry.DEVELOPER) }
         }
     }
