@@ -30,6 +30,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
@@ -65,8 +66,9 @@ private enum class Destination(
     @get:DrawableRes val iconRes: Int,
 ) {
     CONNECT("connect", "连接", R.drawable.ic_connect),
-    HELP("help", "帮助", R.drawable.ic_help),
+
     MONITORING("monitoring", "检测", R.drawable.ic_monitoring),
+    HELP("help", "帮助", R.drawable.ic_help),
     SETTINGS("settings", "设置", R.drawable.ic_settings),
 }
 
@@ -167,7 +169,10 @@ private fun AnimatedVisibilityScope.NavigationPage(
     ) {
         Row(Modifier.fillMaxSize()) {
             if (landscape && selectedDestination != null) {
-                NavigationRail(modifier = Modifier.fillMaxHeight()) {
+                NavigationRail(
+                    modifier = Modifier.fillMaxHeight(),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
                     Destination.entries.forEach { item ->
                         NavigationRailItem(
                             selected = selectedDestination == item,
@@ -183,6 +188,9 @@ private fun AnimatedVisibilityScope.NavigationPage(
                 topBar = {
                     TopAppBar(
                         title = { Text(title) },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        ),
                         navigationIcon = {
                             if (onBack != null) {
                                 IconButton(onClick = { if (active) onBack() }) {
@@ -194,7 +202,7 @@ private fun AnimatedVisibilityScope.NavigationPage(
                 },
                 bottomBar = {
                     if (!landscape && selectedDestination != null) {
-                        NavigationBar {
+                        NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                             Destination.entries.forEach { item ->
                                 NavigationBarItem(
                                     selected = selectedDestination == item,

@@ -9,23 +9,30 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,8 +45,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -60,8 +70,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     var error by remember { mutableStateOf<String?>(null) }
     var devices by remember { mutableStateOf<List<PairedReceiver>?>(null) }
     var expanded by remember { mutableStateOf(false) }
-    LaunchedEffect(active) {
-        if (!active) expanded = false
+    LaunchedEffect(active, status.active) {
+        if (!active || status.active) expanded = false
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -92,7 +102,12 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         receiverPicker = {
             val selectedName = settings.name.takeIf { settings.receiverAddress.isNotEmpty() }.orEmpty()
             ReceiverPicker(
-                selectedName, settings.receiverAddress, devices, expanded && active, onDismiss = { expanded = false },
+                selectedName = selectedName,
+                selectedAddress = settings.receiverAddress,
+                devices = devices,
+                enabled = !status.active,
+                expanded = expanded && active,
+                onDismiss = { expanded = false },
                 onOpen = {
                     error = null
                     if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
@@ -141,35 +156,113 @@ private fun ProjectionContent(
     onProjectionClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
-        modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        if (!supported) {
-            Text("CarPlay 投屏需要 Android 13 或更新版本")
-        } else {
-            if (!status.active) {
-                receiverPicker()
-                OutlinedTextField(settings.address, { onSettingsChange(settings.copy(address = it)) },
-                    label = { Text("本机蓝牙地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                TextButton(onClick = onToggleCustomCode) { Text(if (showCustomCode) "使用默认网络配对码" else "使用自定义网络配对码") }
-                if (showCustomCode) {
-                    OutlinedTextField(settings.pin, { onSettingsChange(settings.copy(pin = it.take(16))) },
-                        label = { Text("网络配对码") }, visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true, modifier = Modifier.fillMaxWidth())
-                }
-            }
-            Button(enabled = status.active || (settings.valid && settings.receiverAddress.isNotBlank()), onClick = onProjectionClick) { Text(if (status.active) "停止投屏" else "开始投屏") }
-            val message = error ?: status.error ?: status.receiverStatus ?: when (status.phase) {
-                CapturePhase.WAITING_FOR_RECEIVER -> "正在等待车机 CarPlay 连接"
+    val colors = MaterialTheme.colorScheme
+    val connectionError = error ?: status.error
+    val showError = supported && connectionError != null
+    val message = if (!supported) {
+        "CarPlay 投屏需要 Android 13 或更新版本"
+    } else {
+        connectionError ?: status.receiverStatus ?: when (status.phase) {
+            CapturePhase.WAITING_FOR_RECEIVER -> "正在等待车机 CarPlay 连接"
             CapturePhase.READY_TO_START_CAR_WITH -> "车机已就绪，返回 CarNat 即可启动 CarWith"
             CapturePhase.ARMED -> "正在启动 CarWith"
-                CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
-                CapturePhase.STOPPED -> "投屏已停止"
-                else -> null
-            }
-            if (message != null) Text(message)
+            CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
+            CapturePhase.RECEIVING -> "正在投屏"
+            CapturePhase.STOPPED -> "投屏已停止"
+            else -> "等待连接"
         }
+    }
+    Box(modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp)
+                .padding(top = 24.dp, bottom = if (supported) 96.dp else 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.extraLarge,
+                colors = CardDefaults.cardColors(
+                    containerColor = colors.secondaryContainer,
+                    contentColor = colors.onSecondaryContainer,
+                ),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        painterResource(R.drawable.ic_mobile_cast),
+                        contentDescription = "手机投屏",
+                        modifier = Modifier.size(32.dp),
+                    )
+                    ProjectionLink(supported && status.active, Modifier.weight(1f))
+                    Icon(
+                        painterResource(R.drawable.ic_extension),
+                        contentDescription = "CarNat",
+                        modifier = Modifier.size(32.dp),
+                    )
+                    ProjectionLink(supported && status.active, Modifier.weight(1f))
+                    Icon(
+                        painterResource(R.drawable.ic_car_gear),
+                        contentDescription = "车机",
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = if (showError) colors.errorContainer else colors.surfaceContainer,
+                    contentColor = if (showError) colors.onErrorContainer else colors.onSurface,
+                ) {
+                    Text(
+                        message,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+            if (supported) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    receiverPicker()
+                    if (!status.active) {
+                        OutlinedTextField(settings.address, { onSettingsChange(settings.copy(address = it)) },
+                            label = { Text("本机蓝牙地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        TextButton(onClick = onToggleCustomCode) { Text(if (showCustomCode) "使用默认网络配对码" else "使用自定义网络配对码") }
+                        if (showCustomCode) {
+                            OutlinedTextField(settings.pin, { onSettingsChange(settings.copy(pin = it.take(16))) },
+                                label = { Text("网络配对码") }, visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true, modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                }
+            }
+        }
+        if (supported) {
+            val enabled = status.active || (settings.valid && settings.receiverAddress.isNotBlank())
+            ExtendedFloatingActionButton(
+                onClick = { if (enabled) onProjectionClick() },
+                modifier = Modifier.align(Alignment.BottomEnd)
+                    .padding(end = 24.dp, bottom = 24.dp)
+                    .semantics { if (!enabled) disabled() },
+                containerColor = if (enabled) colors.primaryContainer else colors.surfaceContainerHighest,
+                contentColor = if (enabled) colors.onPrimaryContainer else colors.onSurface.copy(alpha = 0.38f),
+                icon = { Icon(painterResource(R.drawable.ic_cast), contentDescription = null) },
+                text = { Text(if (status.active) "停止投屏" else "开始投屏") },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProjectionLink(active: Boolean, modifier: Modifier) {
+    val color = MaterialTheme.colorScheme.onSecondaryContainer
+    val track = color.copy(alpha = 0.18f)
+    if (active) {
+        LinearProgressIndicator(modifier.height(4.dp), color = color, trackColor = track)
+    } else {
+        Box(modifier.height(4.dp).background(track, RoundedCornerShape(50)))
     }
 }
 
@@ -206,7 +299,18 @@ private fun ProjectionPreviewContent(status: CaptureStatus) {
         showCustomCode = false,
         error = null,
         supported = true,
-        receiverPicker = { ReceiverPicker("CarPlay 接收端", "02:00:00:00:00:01", emptyList(), false, {}, {}, {}) },
+        receiverPicker = {
+            ReceiverPicker(
+                selectedName = "CarPlay 接收端",
+                selectedAddress = "02:00:00:00:00:01",
+                devices = emptyList(),
+                enabled = !status.active,
+                expanded = false,
+                onDismiss = {},
+                onOpen = {},
+                onSelect = {},
+            )
+        },
         onSettingsChange = {},
         onToggleCustomCode = {},
         onProjectionClick = {},
@@ -232,28 +336,31 @@ private fun ReceiverPicker(
     selectedName: String,
     selectedAddress: String,
     devices: List<PairedReceiver>?,
+    enabled: Boolean,
     expanded: Boolean,
     onDismiss: () -> Unit,
     onOpen: () -> Unit,
     onSelect: (PairedReceiver) -> Unit,
 ) {
+    val menuExpanded = enabled && expanded
     ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { if (it) onOpen() else onDismiss() },
+        expanded = menuExpanded,
+        onExpandedChange = { if (enabled && it) onOpen() else onDismiss() },
     ) {
         OutlinedTextField(
             value = selectedName,
             onValueChange = {},
+            enabled = enabled,
             readOnly = true,
             singleLine = true,
             leadingIcon = { Icon(painterResource(R.drawable.ic_bluetooth_drive), contentDescription = null) },
             label = { Text("车载蓝牙") },
             placeholder = { Text("选择已配对设备") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(menuExpanded) },
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled).fillMaxWidth(),
         )
         ExposedDropdownMenu(
-            expanded = expanded,
+            expanded = menuExpanded,
             onDismissRequest = onDismiss,
             shape = RoundedCornerShape(16.dp),
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
