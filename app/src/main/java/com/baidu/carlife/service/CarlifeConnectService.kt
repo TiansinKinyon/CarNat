@@ -129,7 +129,8 @@ class CarlifeConnectService : Service() {
                             if (expectedResolution == null) {
                                 probedResolution = resolution
                             } else {
-                                val changed = !expectedResolution.matchesEncoderSettings(preferences.applyTo(resolution))
+                                val changed = preferences.manualDisplayMode == null &&
+                                    !expectedResolution.matchesEncoderSettings(preferences.applyTo(resolution))
                                 projectionScope.launch {
                                     if (receiverProbe === probe) {
                                         mutableState.update { it.copy(receiverDisplayChanged = changed) }
@@ -252,7 +253,13 @@ class CarlifeConnectService : Service() {
                 mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
                 val capture = CaptureSession()
                 worker.post { session = capture }
-                startReceiver(capture)
+                val manualMode = ProjectionPreferences.load(this).manualDisplayMode
+                if (manualMode != null) {
+                    Log.i(TAG, "Using a manual display mode; starting CarWith before the receiver connection")
+                    prepareCarWithLaunch(manualMode)
+                } else {
+                    startReceiver(capture)
+                }
             }
             return START_NOT_STICKY
         }
@@ -291,7 +298,7 @@ class CarlifeConnectService : Service() {
         mutableState.update {
             it.copy(
                 phase = CapturePhase.READY_TO_START_CAR_WITH,
-                receiverStatus = "主屏分辨率已确认，正在准备启动 CarWith",
+                receiverStatus = "投屏参数已就绪，正在准备启动 CarWith",
             )
         }
     }

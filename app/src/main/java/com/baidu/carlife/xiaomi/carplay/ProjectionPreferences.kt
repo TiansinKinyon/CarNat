@@ -15,6 +15,14 @@ internal data class ProjectionPreferences(
     val mediaBufferMs: Int? = null,
     val navigationBufferMs: Int? = null,
 ) {
+    val manualDisplayMode: CarPlayResolution?
+        get() {
+            val configuredWidth = width ?: return null
+            val configuredHeight = height ?: return null
+            val configuredFps = fpsLimit ?: return null
+            return CarPlayResolution(configuredWidth, configuredHeight, configuredFps)
+        }
+
     fun applyTo(receiver: CarPlayResolution): CarPlayResolution = CarPlayResolution(
         width ?: receiver.width,
         height ?: receiver.height,

@@ -1,9 +1,21 @@
 package com.baidu.carlife.xiaomi.carplay
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ProjectionPreferencesTest {
+    @Test
+    fun manualModeRequiresBothDimensionsAndFrameRate() {
+        assertNull(ProjectionPreferences().manualDisplayMode)
+        assertNull(ProjectionPreferences(width = 1600, height = 1068).manualDisplayMode)
+        assertNull(ProjectionPreferences(fpsLimit = 60).manualDisplayMode)
+        assertEquals(
+            CarPlayResolution(1600, 1068, 60),
+            ProjectionPreferences(width = 1600, height = 1068, fpsLimit = 60).manualDisplayMode,
+        )
+    }
+
     @Test
     fun defaultsUseReceiverDisplay() {
         val advertised = CarPlayResolution(1920, 766, 60)

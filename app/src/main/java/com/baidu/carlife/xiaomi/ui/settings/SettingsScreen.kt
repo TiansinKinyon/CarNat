@@ -239,7 +239,7 @@ private fun ProjectionEditor(
                 { onSave(current.copy(fpsLimit = null)) }) {
                 SettingCheckbox("跟随车机", followReceiver) { followReceiver = it }
                 NumberField("帧率上限（fps）", value, enabled = !followReceiver) { value = it }
-                Text("自定义范围为 10–120 fps，并受到车机帧率上限约束。")
+                Text("自定义范围为 10–120 fps。宽高也设为自定义时，直接按手动值启动。")
             }
         }
         Editor.BITRATE -> {
