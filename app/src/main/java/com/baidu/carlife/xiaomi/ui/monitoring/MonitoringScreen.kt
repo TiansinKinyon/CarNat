@@ -28,6 +28,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CaptureStatus
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.service.ReceiverConnection
 import com.baidu.carlife.xiaomi.carplay.CarPlayAudioInfo
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
 import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
@@ -50,37 +51,39 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        MonitoringSection("CarWith") {
+        MonitoringSection("视频") {
             Metric("输出分辨率", resolutionLabel(capture.outputWidth, capture.outputHeight))
-            Metric("编码帧率上限", capture.encoderFpsLimit?.let { "$it fps" })
+            Metric("输出帧率上限", capture.encoderFpsLimit?.let { "$it fps" })
             Metric("实时帧率", capture.outputFps?.let { "%.1f fps".format(it) })
-            Metric("视频目标码率", capture.targetVideoBitrateKbps?.let { "$it kbps" })
-            Metric("视频实测码率", capture.outputMbps?.let { "%.2f Mbps".format(it) })
+            Metric("视频目标码率", capture.targetVideoBitrateKbps?.let { "$it Kbps" })
+            Metric("视频输出码率", capture.outputMbps?.let { "%.2f Mbps".format(it) })
             Metric("累计输出帧数", capture.frames.takeIf { capture.outputFps != null || it > 0 }?.toString())
             Metric("虚拟屏 ID", capture.displayId?.toString())
-        }
-
-        MonitoringSection("车机 CarPlay") {
             Metric("请求分辨率", resolutionLabel(receiver.resolution?.width, receiver.resolution?.height))
-            Metric("车机帧率上限", receiver.resolution?.maxFps?.let { "$it fps" })
+            Metric("接收帧率上限", receiver.resolution?.maxFps?.let { "$it fps" })
             if (capture.receiverDisplayChanged) {
-                Text("车机显示参数已变更。当前投屏沿用原画面，重新开始投屏后应用新参数。")
+                Text("车机显示参数已变更，重新开始投屏后应用新参数。")
             }
-            Metric("连接状态", capture.error ?: capture.receiverStatus)
+            val connectionStatus = when {
+                capture.error != null -> capture.error
+                capture.active && capture.receiverConnection == ReceiverConnection.CONNECTED -> "连接成功"
+                else -> capture.receiverStatus
+            }
+            Metric("连接状态", connectionStatus)
         }
 
-        MonitoringSection("CarPlay 音频") {
+        MonitoringSection("音频") {
             AudioMetrics("媒体", receiver.mediaAudio)
             AudioMetrics("导航", receiver.navigationAudio)
         }
 
-        MonitoringSection("蓝牙与 Wi-Fi") {
-            Metric("接收端蓝牙名称", receiver.receiverName)
-            Metric("接收端蓝牙地址", receiver.receiverAddress)
+        MonitoringSection("连接") {
+            Metric("车载蓝牙名称", receiver.receiverName)
+            Metric("车载蓝牙地址", receiver.receiverAddress)
             Metric("本机蓝牙地址", receiver.phoneAddress)
-            Metric("蓝牙传输", receiver.receiverAddress?.let { "经典蓝牙 · RFCOMM / iAP2" })
-            Metric("Wi-Fi SSID", wifi?.ssid)
-            Metric("Wi-Fi 加密", wifi?.let {
+            Metric("蓝牙传输协议", receiver.receiverAddress?.let { "经典蓝牙 · RFCOMM / iAP2" })
+            Metric("车载 Wi-Fi 名称", wifi?.ssid)
+            Metric("Wi-Fi 安全性", wifi?.let {
                 when (it.security) {
                     0 -> "开放"
                     2 -> "WPA/WPA2"
@@ -95,8 +98,8 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
                 supportingContent = {
                     Text(
                         when {
-                            wifi == null -> "—"
-                            wifi.passphrase.isEmpty() -> "无需密码"
+                            wifi == null -> "N/A"
+                            wifi.passphrase.isEmpty() -> "无密码"
                             active && showPassword -> wifi.passphrase
                             else -> "••••••••"
                         },
@@ -111,10 +114,10 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             )
-            Metric("车机地址", receiver.host)
+            Metric("车载 IP 地址", receiver.host)
             Metric("CarPlay 控制端口", receiver.port?.toString())
             Metric("投屏网络接口", receiver.wifiInterface)
-            Metric("手机投屏 IP", receiver.phoneIps.takeIf { it.isNotEmpty() }?.joinToString("\n"))
+            Metric("手机投屏 IP 地址", receiver.phoneIps.takeIf { it.isNotEmpty() }?.joinToString("\n"))
         }
     }
 }

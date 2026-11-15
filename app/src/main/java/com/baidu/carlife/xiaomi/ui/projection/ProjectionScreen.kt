@@ -204,12 +204,12 @@ private fun ProjectionContent(
         supported && status.active -> ProjectionLinkStatus.CONNECTING
         else -> ProjectionLinkStatus.PENDING
     }
-    val message = if (!supported) {
-        "CarPlay 投屏需要 Android 13 或更新版本"
-    } else {
-        connectionError ?: status.receiverStatus ?: when (status.phase) {
-            CapturePhase.WAITING_FOR_RECEIVER -> "正在等待车机 CarPlay 连接"
-            CapturePhase.READY_TO_START_CAR_WITH -> "车机已就绪，返回 CarNat 即可启动 CarWith"
+    val message = when {
+        !supported -> "CarPlay 投屏需要 Android 13 或更新版本"
+        showSuccess -> "连接成功"
+        else -> connectionError ?: status.receiverStatus ?: when (status.phase) {
+            CapturePhase.WAITING_FOR_RECEIVER -> "正在等待车载 CarPlay 连接"
+            CapturePhase.READY_TO_START_CAR_WITH -> "车机连接成功，返回 CarNat 即可启动 CarWith"
             CapturePhase.ARMED -> "正在启动 CarWith"
             CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
             CapturePhase.RECEIVING -> "正在投屏"
@@ -269,7 +269,7 @@ private fun ProjectionContent(
                         Text(when {
                             addressError && phoneAddress.isBlank() -> "请填写本机蓝牙地址"
                             addressError -> "请输入有效的蓝牙地址"
-                            else -> "可在手机系统的状态信息中查看"
+                            else -> "请在 系统设置 > 关于手机 查找本机蓝牙地址"
                         })
                     },
                     isError = addressError,
@@ -504,7 +504,7 @@ private fun ReceiverPicker(
         ) {
             if (devices.isNullOrEmpty()) {
                 DropdownMenuItem(
-                    text = { Text(if (devices == null) "请开启蓝牙并检查附近设备权限" else "请先在系统蓝牙设置中配对") },
+                    text = { Text(if (devices == null) "请开启蓝牙并检查附近设备权限" else "请先在系统蓝牙设置中完成配对") },
                     onClick = onDismiss,
                 )
             }

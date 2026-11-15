@@ -70,7 +70,7 @@ internal enum class SettingEntry(val route: String, val title: String) {
 }
 
 private enum class Editor(val title: String) {
-    RESOLUTION("输出分辨率"), FPS("本机帧率上限"), BITRATE("视频码率"),
+    RESOLUTION("输出分辨率"), FPS("输出帧率上限"), BITRATE("视频目标码率"),
     AUDIO_FORMAT("音频格式"), AUDIO_BUFFER("音频缓冲"), PIN("网络配对码"),
 }
 
@@ -102,7 +102,7 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
                 editor = Editor.FPS
             }
             SettingsDivider()
-            SettingsRow(Editor.BITRATE.title, "${preferences.videoBitrateKbps} kbps", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_mist), contentDescription = null) }) {
+            SettingsRow(Editor.BITRATE.title, "${preferences.videoBitrateKbps} Kbps", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_mist), contentDescription = null) }) {
                 editor = Editor.BITRATE
             }
             SettingsDivider()
@@ -165,7 +165,7 @@ internal fun DeveloperSettingsScreen(
                 SettingsCard {
                     SettingsRow(
                         Editor.PIN.title,
-                        if (settings.pin.isEmpty()) "默认（3939）" else "已自定义",
+                        if (settings.pin.isEmpty()) "默认（3939）" else "自定义",
                         active,
                         capture.active,
                         leadingIcon = { Icon(painterResource(R.drawable.ic_bluetooth_searching), contentDescription = null) }
@@ -191,7 +191,7 @@ internal fun DeveloperSettingsScreen(
                         label = { Text(selected.title) },
                         placeholder = { Text("3939") },
                         supportingText = {
-                            Text("仅在接收端使用其他网络配对码时填写。")
+                            Text("仅在接收端使用其他网络配对码时修改。")
                         },
                         singleLine = true,
                         isError = !valid,
@@ -224,10 +224,10 @@ private fun ProjectionEditor(
             EditorDialog(editor.title, valid, onDismiss,
                 { onSave(current.copy(width = w.takeUnless { followReceiver }, height = h.takeUnless { followReceiver })) },
                 { onSave(current.copy(width = null, height = null)) }) {
-                FollowReceiverCheckbox(followReceiver) { followReceiver = it }
-                NumberField("宽度（px）", width, enabled = !followReceiver, leadingIcon = { Icon(painterResource(R.drawable.ic_fit_page_width), contentDescription = null) }) { width = it }
-                NumberField("高度（px）", height, enabled = !followReceiver, leadingIcon = { Icon(painterResource(R.drawable.ic_fit_page_height), contentDescription = null) }) { height = it }
-                Text("自定义宽高须为 320–4096 范围内的偶数。")
+                SettingCheckbox("跟随车机", followReceiver) { followReceiver = it }
+                NumberField("水平分辨率（px）", width, enabled = !followReceiver, leadingIcon = { Icon(painterResource(R.drawable.ic_fit_page_width), contentDescription = null) }) { width = it }
+                NumberField("垂直分辨率（px）", height, enabled = !followReceiver, leadingIcon = { Icon(painterResource(R.drawable.ic_fit_page_height), contentDescription = null) }) { height = it }
+                Text("水平与垂直分辨率应为 320–4096 范围内的整数。")
             }
         }
         Editor.FPS -> {
@@ -237,9 +237,9 @@ private fun ProjectionEditor(
             EditorDialog(editor.title, followReceiver || limit in ProjectionPreferences.frameRates, onDismiss,
                 { onSave(current.copy(fpsLimit = limit.takeUnless { followReceiver })) },
                 { onSave(current.copy(fpsLimit = null)) }) {
-                FollowReceiverCheckbox(followReceiver) { followReceiver = it }
+                SettingCheckbox("跟随车机", followReceiver) { followReceiver = it }
                 NumberField("帧率上限（fps）", value, enabled = !followReceiver) { value = it }
-                Text("自定义范围为 10–120 fps，并受车机上限约束。")
+                Text("自定义范围为 10–120 fps，并受到车机帧率上限约束。")
             }
         }
         Editor.BITRATE -> {
@@ -285,7 +285,7 @@ private fun ProjectionEditor(
                         )
                     },
                 )
-                NumberField("自定义（1000–20000 kbps）", value) { value = it }
+                NumberField("自定义（1000–20000 Kbps）", value) { value = it }
             }
         }
         Editor.AUDIO_FORMAT -> {
@@ -312,15 +312,29 @@ private fun ProjectionEditor(
         Editor.AUDIO_BUFFER -> {
             var media by remember { mutableStateOf(current.mediaBufferMs?.toString().orEmpty()) }
             var navigation by remember { mutableStateOf(current.navigationBufferMs?.toString().orEmpty()) }
+            var automatic by remember {
+                mutableStateOf(current.mediaBufferMs == null && current.navigationBufferMs == null)
+            }
+            val mediaMs = media.toIntOrNull()
+            val navigationMs = navigation.toIntOrNull()
             val range = ProjectionPreferences.audioBuffers
-            val valid = (media.isBlank() || media.toIntOrNull() in range) &&
-                (navigation.isBlank() || navigation.toIntOrNull() in range)
+            val valid = automatic || (
+                (media.isNotBlank() || navigation.isNotBlank()) &&
+                    (media.isBlank() || mediaMs in range) &&
+                    (navigation.isBlank() || navigationMs in range)
+                )
             EditorDialog(editor.title, valid, onDismiss,
-                { onSave(current.copy(mediaBufferMs = media.toIntOrNull(), navigationBufferMs = navigation.toIntOrNull())) },
+                {
+                    onSave(current.copy(
+                        mediaBufferMs = mediaMs.takeUnless { automatic },
+                        navigationBufferMs = navigationMs.takeUnless { automatic },
+                    ))
+                },
                 { onSave(current.copy(mediaBufferMs = null, navigationBufferMs = null)) }) {
-                NumberField("媒体缓冲（ms）", media, leadingIcon = { Icon(painterResource(R.drawable.ic_music_note), contentDescription = null) }) { media = it }
-                NumberField("导航缓冲（ms）", navigation, leadingIcon = { Icon(painterResource(R.drawable.ic_navigation), contentDescription = null) }) { navigation = it }
-                Text("留空自动。可填 40–1000 ms，作为发送给车机的缓冲请求。")
+                SettingCheckbox("自动", automatic) { automatic = it }
+                NumberField("媒体缓冲（ms）", media, enabled = !automatic, leadingIcon = { Icon(painterResource(R.drawable.ic_music_note), contentDescription = null) }) { media = it }
+                NumberField("导航缓冲（ms）", navigation, enabled = !automatic, leadingIcon = { Icon(painterResource(R.drawable.ic_navigation), contentDescription = null) }) { navigation = it }
+                Text("自定义范围为 40–1000 ms，作为发送给车机的缓冲请求。")
             }
         }
         else -> Unit
@@ -367,10 +381,10 @@ private fun SettingsRow(
 
 private fun Modifier.settingsLockAppearance(locked: Boolean): Modifier =
     if (!locked) this
-    else alpha(0.38f).semantics { stateDescription = "投屏期间不可修改" }
+    else alpha(0.38f).semantics { stateDescription = "投屏期间无法更改" }
 
 private fun showSettingsLocked(context: Context) {
-    Toast.makeText(context, "投屏期间此项已禁用", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, "投屏期间无法更改", Toast.LENGTH_SHORT).show()
 }
 
 @Composable
@@ -397,7 +411,7 @@ private fun NumberField(
 }
 
 @Composable
-private fun FollowReceiverCheckbox(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+private fun SettingCheckbox(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth()
             .toggleable(value = checked, role = Role.Checkbox, onValueChange = onCheckedChange)
@@ -406,7 +420,7 @@ private fun FollowReceiverCheckbox(checked: Boolean, onCheckedChange: (Boolean) 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Checkbox(checked = checked, onCheckedChange = null)
-        Text("跟随车机")
+        Text(label)
     }
 }
 
