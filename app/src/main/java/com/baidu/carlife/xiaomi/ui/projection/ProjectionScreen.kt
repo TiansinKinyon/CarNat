@@ -3,9 +3,13 @@ package com.baidu.carlife.xiaomi.ui.projection
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
@@ -25,6 +29,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenuItem
@@ -34,6 +39,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
@@ -117,6 +123,7 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         settings = settings,
         phoneAddress = phoneAddress,
         onAddressChange = { phoneAddress = it.trim().uppercase(Locale.ROOT).take(17) },
+        onOpenDeviceInfo = { openDeviceInfoSettings(context) },
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
         receiverPicker = {
@@ -170,6 +177,7 @@ private fun ProjectionContent(
     settings: ReceiverSettings,
     phoneAddress: String,
     onAddressChange: (String) -> Unit,
+    onOpenDeviceInfo: () -> Unit,
     error: String?,
     supported: Boolean,
     receiverPicker: @Composable () -> Unit,
@@ -180,6 +188,7 @@ private fun ProjectionContent(
     val validAddress = ReceiverSettings.validAddress(phoneAddress)
     val addressFocus = remember { FocusRequester() }
     var addressRequired by rememberSaveable { mutableStateOf(false) }
+    var showAddressHelp by rememberSaveable { mutableStateOf(false) }
     val addressError = !validAddress && (addressRequired || phoneAddress.isNotEmpty())
     val connectionError = error ?: status.error
     val showError = supported && (
@@ -258,6 +267,14 @@ private fun ProjectionContent(
                 receiverPicker()
                 OutlinedTextField(
                     leadingIcon = { Icon(painterResource(R.drawable.ic_settings_bluetooth), contentDescription = null) },
+                    trailingIcon = {
+                        IconButton(onClick = { showAddressHelp = true }) {
+                            Icon(
+                                painterResource(R.drawable.ic_help),
+                                contentDescription = "如何查找本机蓝牙地址",
+                            )
+                        }
+                    },
                     value = phoneAddress,
                     onValueChange = {
                         if (ReceiverSettings.validAddress(it)) addressRequired = false
@@ -269,7 +286,7 @@ private fun ProjectionContent(
                         Text(when {
                             addressError && phoneAddress.isBlank() -> "请填写本机蓝牙地址"
                             addressError -> "请输入有效的蓝牙地址"
-                            else -> "请在 系统设置 > 关于手机 查找本机蓝牙地址"
+                            else -> "在关于手机的设备信息或状态中查找蓝牙地址"
                         })
                     },
                     isError = addressError,
@@ -302,6 +319,23 @@ private fun ProjectionContent(
                 text = { Text(if (status.active) "停止投屏" else "开始投屏") },
             )
         }
+    }
+    if (supported && showAddressHelp) {
+        AlertDialog(
+            onDismissRequest = { showAddressHelp = false },
+            title = { Text("如何查找本机蓝牙地址") },
+            text = { Text("在 系统设置 > 关于手机 里查找本机蓝牙地址，因机型而异。\n\n" +
+                    "小米 HyperOS：我的设备 > 全部参数与信息 > 状态信息 > 蓝牙地址") },
+            dismissButton = {
+                TextButton(onClick = { showAddressHelp = false }) { Text("取消") }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showAddressHelp = false
+                    onOpenDeviceInfo()
+                }) { Text("打开设置") }
+            },
+        )
     }
 }
 
@@ -390,6 +424,20 @@ private fun startProjection(context: Context, settings: ReceiverSettings): Strin
     return null
 }
 
+private fun openDeviceInfoSettings(context: Context) {
+    for (action in listOf(Settings.ACTION_DEVICE_INFO_SETTINGS, Settings.ACTION_SETTINGS)) {
+        try {
+            context.startActivity(Intent(action))
+            return
+        } catch (_: ActivityNotFoundException) {
+            continue
+        } catch (_: SecurityException) {
+            continue
+        }
+    }
+    Toast.makeText(context, "无法打开系统设置", Toast.LENGTH_SHORT).show()
+}
+
 @Preview(name = "待连接", showBackground = true, widthDp = 360)
 @Composable
 private fun ProjectionReadyPreview() {
@@ -436,6 +484,7 @@ private fun ProjectionPreviewContent(status: CaptureStatus) {
         settings = ReceiverSettings(name = "CarPlay 接收端", receiverAddress = "02:00:00:00:00:01"),
         phoneAddress = "02:12:34:56:78:90",
         onAddressChange = {},
+        onOpenDeviceInfo = {},
         error = null,
         supported = true,
         receiverPicker = {
