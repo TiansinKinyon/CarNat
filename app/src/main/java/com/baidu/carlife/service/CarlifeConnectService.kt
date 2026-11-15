@@ -68,7 +68,7 @@ class CarlifeConnectService : Service() {
     private var stopping = false
 
     @android.annotation.SuppressLint("MissingPermission")
-    private fun startReceiver(capture: CaptureSession) {
+    private fun startReceiver(capture: CaptureSession, readResolutionOnly: Boolean = false) {
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         if (!settings.valid || adapter == null || missingReceiverPermissions(this).isNotEmpty()) {
@@ -84,6 +84,7 @@ class CarlifeConnectService : Service() {
         }
         receiverJob = projectionScope.launch {
             var streamed = false
+            var probedResolution: CarPlayResolution? = null
             try {
                 withContext(Dispatchers.IO) {
                     probe.run(
@@ -93,24 +94,15 @@ class CarlifeConnectService : Service() {
                             timeout.cancel()
                         },
                         receiverAddress = settings.receiverAddress,
+                        readResolutionOnly = readResolutionOnly,
                         onResolution = { resolution ->
-                            projectionScope.launch {
-                                if (receiverProbe !== probe) return@launch
-                                when (mutableState.value.phase) {
-                                    CapturePhase.WAITING_FOR_RECEIVER -> {
-                                        launchResolution = resolution
-                                        timeout.cancel()
-                                        main.postDelayed(armTimeout, CAR_WITH_START_TIMEOUT_MS)
-                                        mutableState.update {
-                                            it.copy(
-                                                phase = CapturePhase.READY_TO_START_CAR_WITH,
-                                                receiverStatus = "车机已就绪，返回 CarNat 即可启动 CarWith",
-                                            )
-                                        }
-                                    }
-                                    CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES, CapturePhase.RECEIVING ->
-                                        worker.post { capture.configure(resolution) }
-                                    else -> Unit
+                            if (readResolutionOnly) {
+                                probedResolution = resolution
+                            } else {
+                                projectionScope.launch {
+                                    if (receiverProbe !== probe) return@launch
+                                    settings.saveResolution(this@CarlifeConnectService, resolution)
+                                    worker.post { capture.configure(resolution) }
                                 }
                             }
                         },
@@ -126,7 +118,7 @@ class CarlifeConnectService : Service() {
                         }
                     }
                 }
-                if (!streamed && receiverProbe === probe) {
+                if (!streamed && probedResolution == null && receiverProbe === probe) {
                     throw IOException("CarPlay 接收端在画面开始前断开")
                 }
             } catch (failure: Exception) {
@@ -141,6 +133,10 @@ class CarlifeConnectService : Service() {
                 if (receiverProbe === probe) {
                     receiverProbe = null
                     mutableReceiverDiagnostics.value = ReceiverDiagnostics()
+                    probedResolution?.let { resolution ->
+                        settings.saveResolution(this@CarlifeConnectService, resolution)
+                        prepareCarWithLaunch(resolution)
+                    }
                 }
             }
         }
@@ -206,7 +202,12 @@ class CarlifeConnectService : Service() {
                 mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
                 val capture = CaptureSession()
                 worker.post { session = capture }
-                startReceiver(capture)
+                val cachedResolution = ReceiverSettings.load(this).loadResolution(this)
+                if (cachedResolution == null) {
+                    startReceiver(capture, readResolutionOnly = true)
+                } else {
+                    prepareCarWithLaunch(cachedResolution)
+                }
             }
             return START_NOT_STICKY
         }
@@ -238,9 +239,19 @@ class CarlifeConnectService : Service() {
         return START_NOT_STICKY
     }
 
+    private fun prepareCarWithLaunch(resolution: CarPlayResolution) {
+        launchResolution = resolution
+        main.postDelayed(armTimeout, CAR_WITH_START_TIMEOUT_MS)
+        mutableState.update {
+            it.copy(
+                phase = CapturePhase.READY_TO_START_CAR_WITH,
+                receiverStatus = "主屏分辨率已确认，正在准备启动 CarWith",
+            )
+        }
+    }
+
     private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
-        val resumeReceiver = receiverProbe == null
-        val restoredCapture = if (resumeReceiver) CaptureSession() else null
+        val capture = CaptureSession()
         main.removeCallbacks(armTimeout)
         mutableState.update {
             it.copy(
@@ -250,12 +261,11 @@ class CarlifeConnectService : Service() {
             )
         }
         worker.post {
-            if (restoredCapture != null) session = restoredCapture
-            val capture = session ?: return@post
+            session = capture
             capture.configure(resolution)
             capture.bind()
         }
-        if (restoredCapture != null) startReceiver(restoredCapture)
+        startReceiver(capture)
     }
 
     private fun failCarWithStartup(message: String) {
