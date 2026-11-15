@@ -65,7 +65,6 @@ class CarlifeConnectService : Service() {
     private val projectionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var receiverProbe: BluetoothReceiverProbe? = null
     private var receiverJob: Job? = null
-    private var negotiatedResolution: CarPlayResolution? = null
     private var stopping = false
 
     @android.annotation.SuppressLint("MissingPermission")
@@ -99,7 +98,7 @@ class CarlifeConnectService : Service() {
                                 if (receiverProbe !== probe) return@launch
                                 when (mutableState.value.phase) {
                                     CapturePhase.WAITING_FOR_RECEIVER -> {
-                                        negotiatedResolution = resolution
+                                        launchResolution = resolution
                                         timeout.cancel()
                                         main.postDelayed(armTimeout, CAR_WITH_START_TIMEOUT_MS)
                                         mutableState.update {
@@ -150,7 +149,7 @@ class CarlifeConnectService : Service() {
     private fun stopReceiver() {
         receiverProbe?.close()
         receiverProbe = null
-        negotiatedResolution = null
+        launchResolution = null
         main.removeCallbacks(armTimeout)
         mutableReceiverDiagnostics.value = ReceiverDiagnostics()
         receiverJob?.cancel()
@@ -179,6 +178,7 @@ class CarlifeConnectService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == stopToken) {
+            clearLaunchTicket(this)
             stopping = true
             stopReceiver()
             mutableState.update {
@@ -201,6 +201,7 @@ class CarlifeConnectService : Service() {
         }
         if (intent?.action == diagnosticToken) {
             if (!stopping && !mutableState.value.active) {
+                clearLaunchTicket(this)
                 startForeground(NOTIFICATION_ID, diagnosticNotification())
                 mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
                 val capture = CaptureSession()
@@ -220,10 +221,12 @@ class CarlifeConnectService : Service() {
         val carWithRequest = intent != null &&
             intent.getStringExtra("bindPackageName") == CAR_WITH_SERVICE.packageName &&
             intent.getStringExtra("bindClassName") == CAR_WITH_SERVICE.className
-        val resolution = negotiatedResolution
-        if (intent != null && carWithRequest && resolution != null && receiverProbe != null &&
-            mutableState.value.phase == CapturePhase.ARMED
-        ) {
+        val phase = mutableState.value.phase
+        val resolution = if (carWithRequest && !stopping && (phase == CapturePhase.ARMED || !phase.isActive)) {
+            consumeLaunchTicket(this)
+        } else null
+        if (intent != null && resolution != null) {
+            startForeground(NOTIFICATION_ID, diagnosticNotification())
             val connectionType = intent.getIntExtra("usb_type", -1)
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
             beginCapture(connectionType, resolution)
@@ -236,6 +239,8 @@ class CarlifeConnectService : Service() {
     }
 
     private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
+        val resumeReceiver = receiverProbe == null
+        val restoredCapture = if (resumeReceiver) CaptureSession() else null
         main.removeCallbacks(armTimeout)
         mutableState.update {
             it.copy(
@@ -245,13 +250,16 @@ class CarlifeConnectService : Service() {
             )
         }
         worker.post {
+            if (restoredCapture != null) session = restoredCapture
             val capture = session ?: return@post
             capture.configure(resolution)
             capture.bind()
         }
+        if (restoredCapture != null) startReceiver(restoredCapture)
     }
 
     private fun failCarWithStartup(message: String) {
+        clearLaunchTicket(this)
         stopReceiver()
         worker.post { session?.fail(message) }
     }
@@ -703,6 +711,9 @@ class CarlifeConnectService : Service() {
         private const val CHANNEL_ID = "carwith_diagnostics"
         private const val NOTIFICATION_ID = 1
         private const val CAR_WITH_START_TIMEOUT_MS = 90_000L
+        // CarWith force-stops the CarLife component before starting its service.
+        private const val LAUNCH_TICKET = "pending_carwith_launch"
+        private var launchResolution: CarPlayResolution? = null
         private const val DPI = 160
         private const val OUTPUT_SAMPLE_MS = 1_000L
         private val mutableReceiverDiagnostics = MutableStateFlow(ReceiverDiagnostics())
@@ -741,14 +752,41 @@ class CarlifeConnectService : Service() {
             context.startService(Intent(context, CarlifeConnectService::class.java).setAction(stopToken))
         }
 
-        internal fun claimCarWithLaunch(): Boolean {
+        internal fun claimCarWithLaunch(context: Context): Boolean {
             val awaitingLaunch = mutableState.value
-            return awaitingLaunch.phase == CapturePhase.READY_TO_START_CAR_WITH &&
-                mutableState.compareAndSet(
-                    awaitingLaunch,
-                    awaitingLaunch.copy(phase = CapturePhase.ARMED, receiverStatus = "正在启动 CarWith"),
-                )
+            val resolution = launchResolution ?: return false
+            if (awaitingLaunch.phase != CapturePhase.READY_TO_START_CAR_WITH) return false
+            val receiver = ReceiverSettings.load(context)
+            if (!context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE).edit()
+                    .putLong("elapsed", SystemClock.elapsedRealtime())
+                    .putLong("wall", System.currentTimeMillis())
+                    .putInt("width", resolution.width)
+                    .putInt("height", resolution.height)
+                    .putString("receiver", receiver.receiverAddress)
+                    .commit()
+            ) return false
+            val armed = awaitingLaunch.copy(phase = CapturePhase.ARMED, receiverStatus = "正在启动 CarWith")
+            if (mutableState.compareAndSet(awaitingLaunch, armed)) return true
+            clearLaunchTicket(context)
+            return false
         }
+
+        private fun consumeLaunchTicket(context: Context): CarPlayResolution? {
+            val ticket = context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE)
+            val elapsedAge = SystemClock.elapsedRealtime() - ticket.getLong("elapsed", -CAR_WITH_START_TIMEOUT_MS)
+            val wallAge = System.currentTimeMillis() - ticket.getLong("wall", 0)
+            if (elapsedAge !in 0 until CAR_WITH_START_TIMEOUT_MS ||
+                wallAge !in 0 until CAR_WITH_START_TIMEOUT_MS ||
+                ticket.getString("receiver", null) != ReceiverSettings.load(context).receiverAddress
+            ) return null
+            val width = ticket.getInt("width", 0)
+            val height = ticket.getInt("height", 0)
+            if (width <= 0 || height <= 0 || !clearLaunchTicket(context)) return null
+            return CarPlayResolution(width, height)
+        }
+
+        private fun clearLaunchTicket(context: Context): Boolean =
+            context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE).edit().clear().commit()
 
         internal fun reportCarWithLaunchFailure(context: Context, message: String) {
             context.startService(

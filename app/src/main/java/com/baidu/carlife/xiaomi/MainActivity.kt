@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 CarlifeConnectService.state.collect {
-                    if (CarlifeConnectService.claimCarWithLaunch()) openCarWith()
+                    if (CarlifeConnectService.claimCarWithLaunch(this@MainActivity)) openCarWith()
                 }
             }
         }
