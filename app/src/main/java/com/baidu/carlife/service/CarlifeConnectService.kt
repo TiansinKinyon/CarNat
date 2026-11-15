@@ -251,7 +251,7 @@ class CarlifeConnectService : Service() {
     }
 
     private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
-        val capture = CaptureSession()
+        val capture = CaptureSession(cachedResolution = resolution)
         main.removeCallbacks(armTimeout)
         mutableState.update {
             it.copy(
@@ -262,7 +262,6 @@ class CarlifeConnectService : Service() {
         }
         worker.post {
             session = capture
-            capture.configure(resolution)
             capture.bind()
         }
         startReceiver(capture)
@@ -305,9 +304,12 @@ class CarlifeConnectService : Service() {
             .build()
     }
 
-    private inner class CaptureSession : ServiceConnection {
+    private inner class CaptureSession(private val cachedResolution: CarPlayResolution? = null) : ServiceConnection {
         private var manager: ICarLifeCastManager? = null
         private var resolution: CarPlayResolution? = null
+        private val prepareFromCache = Runnable {
+            if (resolution == null) cachedResolution?.let(::configure)
+        }
         private var codec: MediaCodec? = null
         private var surface: Surface? = null
         private var bound = false
@@ -518,8 +520,10 @@ class CarlifeConnectService : Service() {
             if (closed) return
             try {
                 bound = bindService(Intent().setComponent(CAR_WITH_SERVICE), this, BIND_AUTO_CREATE)
-                if (bound) worker.postDelayed(timeout, 12_000)
-                else fail("CarWith cast service is unavailable")
+                if (bound) {
+                    worker.postDelayed(timeout, 12_000)
+                    if (cachedResolution != null) worker.postDelayed(prepareFromCache, DISPLAY_REFRESH_TIMEOUT_MS)
+                } else fail("CarWith cast service is unavailable")
             } catch (error: SecurityException) {
                 fail(error.message ?: "CarWith denied the service binding")
             }
@@ -537,8 +541,14 @@ class CarlifeConnectService : Service() {
 
         fun configure(size: CarPlayResolution) {
             if (closed || resolution == size) return
-            if (resolution != null) {
-                fail("车机分辨率已变更为 ${size.width}×${size.height}，请重新开始投屏")
+            worker.removeCallbacks(prepareFromCache)
+            val previous = resolution
+            if (codec != null && previous != null && (previous.width != size.width || previous.height != size.height)) {
+                fail("已更新车机分辨率为 ${size.width}×${size.height}，请重新开始投屏")
+                return
+            }
+            if (codec != null && previous?.frameRate != size.frameRate) {
+                fail("已更新车机帧率上限为 ${size.frameRate} fps，请重新开始投屏")
                 return
             }
             resolution = size
@@ -577,7 +587,10 @@ class CarlifeConnectService : Service() {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, size.frameRate)
+            if (Build.VERSION.SDK_INT >= 29) {
+                format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, size.frameRate.toFloat())
+            }
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
             val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
@@ -690,6 +703,7 @@ class CarlifeConnectService : Service() {
             keyListener = null
             worker.removeCallbacks(timeout)
             worker.removeCallbacks(sampleOutput)
+            worker.removeCallbacks(prepareFromCache)
             try {
                 manager?.stopCast()
             } catch (_: RemoteException) {
@@ -726,6 +740,7 @@ class CarlifeConnectService : Service() {
         private var launchResolution: CarPlayResolution? = null
         private const val DPI = 160
         private const val OUTPUT_SAMPLE_MS = 1_000L
+        private const val DISPLAY_REFRESH_TIMEOUT_MS = 8_000L
         private val mutableReceiverDiagnostics = MutableStateFlow(ReceiverDiagnostics())
         internal val receiverDiagnostics = mutableReceiverDiagnostics.asStateFlow()
         private val mutableState = MutableStateFlow(CaptureStatus())
@@ -772,6 +787,7 @@ class CarlifeConnectService : Service() {
                     .putLong("wall", System.currentTimeMillis())
                     .putInt("width", resolution.width)
                     .putInt("height", resolution.height)
+                    .putInt("max_fps", resolution.maxFps ?: 0)
                     .putString("receiver", receiver.receiverAddress)
                     .commit()
             ) return false
@@ -791,8 +807,9 @@ class CarlifeConnectService : Service() {
             ) return null
             val width = ticket.getInt("width", 0)
             val height = ticket.getInt("height", 0)
+            val maxFps = ticket.getInt("max_fps", 0).takeIf { it > 0 }
             if (width <= 0 || height <= 0 || !clearLaunchTicket(context)) return null
-            return CarPlayResolution(width, height)
+            return CarPlayResolution(width, height, maxFps)
         }
 
         private fun clearLaunchTicket(context: Context): Boolean =

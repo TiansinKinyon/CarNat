@@ -59,6 +59,7 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
 
         MonitoringSection("车机 CarPlay") {
             Metric("请求分辨率", resolutionLabel(receiver.resolution?.width, receiver.resolution?.height))
+            Metric("车机帧率上限", receiver.resolution?.maxFps?.let { "$it fps" })
             Metric("Wi-Fi SSID", wifi?.ssid)
             ListItem(
                 headlineContent = { Text("Wi-Fi 密码") },
@@ -126,7 +127,7 @@ private fun MonitoringPreview() {
                 outputMbps = 3.84,
                 receiverStatus = "正在投屏",
             ),
-            ReceiverDiagnostics(CarPlayResolution(1920, 766), ReceiverWifi("CarPlay", "preview-password", 2)),
+            ReceiverDiagnostics(CarPlayResolution(1920, 766, 60), ReceiverWifi("CarPlay", "preview-password", 2)),
             active = true,
         )
     }

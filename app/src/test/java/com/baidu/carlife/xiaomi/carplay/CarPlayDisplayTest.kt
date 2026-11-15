@@ -19,6 +19,20 @@ class CarPlayDisplayTest {
         assertEquals(CarPlayResolution(720, 1280), CarPlayDisplay.fromReceiverInfo(info).resolution)
     }
 
+    @Test
+    fun readsUpdatedFrameRateFromMainDisplay() {
+        val original = info(display("main", 1920, 766, 110).apply { put("maxFPS", 30) })
+        val updated = info(display("main", 1600, 1068, 110).apply { put("maxFPS", 60) })
+        assertEquals(CarPlayResolution(1920, 766, 30), CarPlayDisplay.fromReceiverInfo(original).resolution)
+        assertEquals(CarPlayResolution(1600, 1068, 60), CarPlayDisplay.fromReceiverInfo(updated).resolution)
+    }
+
+    @Test
+    fun defaultsToThirtyFpsWhenReceiverOmitsLimit() {
+        val info = info(display("main", 1920, 766, 110))
+        assertEquals(30, CarPlayDisplay.fromReceiverInfo(info).resolution.frameRate)
+    }
+
     @Test(expected = ProtocolException::class)
     fun rejectsInvalidDisplaySize() {
         CarPlayDisplay.fromReceiverInfo(info(display("main", 1920, 0, 110)))

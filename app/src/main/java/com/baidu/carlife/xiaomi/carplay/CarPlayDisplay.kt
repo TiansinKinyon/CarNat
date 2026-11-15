@@ -6,7 +6,9 @@ import com.dd.plist.NSNumber
 import com.dd.plist.NSString
 import java.net.ProtocolException
 
-internal data class CarPlayResolution(val width: Int, val height: Int)
+internal data class CarPlayResolution(val width: Int, val height: Int, val maxFps: Int? = null) {
+    val frameRate: Int get() = maxFps ?: 30
+}
 
 internal data class CarPlayDisplay(val uuid: String, val resolution: CarPlayResolution) {
     companion object {
@@ -20,7 +22,12 @@ internal data class CarPlayDisplay(val uuid: String, val resolution: CarPlayReso
                 ?: throw ProtocolException("CarPlay receiver did not advertise a main display")
             val uuid = (display.objectForKey("uuid") as? NSString)?.content?.takeIf { it.isNotBlank() }
                 ?: throw ProtocolException("CarPlay main display has no UUID")
-            return CarPlayDisplay(uuid, CarPlayResolution(display.pixels("widthPixels"), display.pixels("heightPixels")))
+            val maxFps = (display.objectForKey("maxFPS") as? NSNumber)?.longValue()
+                ?.takeIf { it in 1L..Int.MAX_VALUE }?.toInt()
+            return CarPlayDisplay(
+                uuid,
+                CarPlayResolution(display.pixels("widthPixels"), display.pixels("heightPixels"), maxFps),
+            )
         }
 
         private val NSDictionary.type: Long?

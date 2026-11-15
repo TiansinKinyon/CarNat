@@ -41,6 +41,7 @@ internal object CarPlayScreenProbe {
         val receiverInfo = parse(info)
         val display = CarPlayDisplay.fromReceiverInfo(receiverInfo)
         val resolution = display.resolution
+        onResolution(resolution)
 
         onStage("正在建立 CarPlay 会话")
         val session = NSDictionary().apply {
@@ -83,7 +84,6 @@ internal object CarPlayScreenProbe {
                         val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
                         if (!CarlifeConnectService.state.value.active) return connected
                         onStage(connected)
-                        onResolution(resolution)
                         val heartbeat = Thread({
                         try {
                             while (!video.isClosed) {
