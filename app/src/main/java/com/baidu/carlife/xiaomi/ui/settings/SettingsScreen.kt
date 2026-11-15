@@ -1,5 +1,7 @@
 package com.baidu.carlife.xiaomi.ui.settings
 
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -32,10 +34,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
@@ -78,15 +83,15 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
 
     SettingsLayout {
         SettingsCard {
-            SettingsRow(Editor.RESOLUTION.title, preferences.width?.let { "$it × ${preferences.height}" } ?: "跟随车机", editable) {
+            SettingsRow(Editor.RESOLUTION.title, preferences.width?.let { "$it × ${preferences.height}" } ?: "跟随车机", active, capture.active) {
                 editor = Editor.RESOLUTION
             }
             SettingsDivider()
-            SettingsRow(Editor.FPS.title, preferences.fpsLimit?.let { "$it fps" } ?: "跟随车机", editable) {
+            SettingsRow(Editor.FPS.title, preferences.fpsLimit?.let { "$it fps" } ?: "跟随车机", active, capture.active) {
                 editor = Editor.FPS
             }
             SettingsDivider()
-            SettingsRow(Editor.BITRATE.title, "${preferences.videoBitrateKbps} kbps", editable) {
+            SettingsRow(Editor.BITRATE.title, "${preferences.videoBitrateKbps} kbps", active, capture.active) {
                 editor = Editor.BITRATE
             }
             SettingsDivider()
@@ -95,14 +100,13 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
                 preferences.mediaBufferMs?.let { "媒体 $it ms" },
                 preferences.navigationBufferMs?.let { "导航 $it ms" },
             ).joinToString(" · ")
-            SettingsRow(Editor.AUDIO.title, audioSummary, editable) {
+            SettingsRow(Editor.AUDIO.title, audioSummary, active, capture.active) {
                 editor = Editor.AUDIO
             }
         }
-        if (capture.active) Text("停止投屏后可修改参数", style = MaterialTheme.typography.bodySmall)
         if (error) SaveError()
         SettingsCard {
-            SettingsRow("开发者选项", "网络配对码", active) { onOpen(SettingEntry.DEVELOPER) }
+            SettingsRow("开发者选项", "网络配对码", active, capture.active) { onOpen(SettingEntry.DEVELOPER) }
         }
     }
 
@@ -133,12 +137,15 @@ internal fun DeveloperSettingsScreen(active: Boolean) {
 
     SettingsLayout {
         SettingsCard {
-            SettingsRow(Editor.PIN.title, if (settings.pin.isEmpty()) "默认（3939）" else "已自定义", editable) { editor = Editor.PIN }
+            SettingsRow(Editor.PIN.title, if (settings.pin.isEmpty()) "默认（3939）" else "已自定义", active, capture.active) { editor = Editor.PIN }
         }
-        OutlinedButton(onClick = { save("") }, enabled = editable && settings.pin.isNotEmpty()) {
+        OutlinedButton(
+            onClick = { if (capture.active) showSettingsLocked(context) else save("") },
+            enabled = active && (capture.active || settings.pin.isNotEmpty()),
+            modifier = Modifier.settingsLockAppearance(capture.active),
+        ) {
             Text("恢复默认")
         }
-        if (capture.active) Text("停止投屏后可修改参数", style = MaterialTheme.typography.bodySmall)
         if (error) SaveError()
     }
     val selected = editor
@@ -264,14 +271,27 @@ private fun SettingsCard(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SettingsRow(title: String, summary: String, enabled: Boolean, onClick: () -> Unit) {
+private fun SettingsRow(title: String, summary: String, active: Boolean, locked: Boolean, onClick: () -> Unit) {
+    val context = LocalContext.current
     ListItem(
         leadingContent = { Icon(painterResource(R.drawable.ic_settings), contentDescription = null) },
         headlineContent = { Text(title) },
         supportingContent = { Text(summary) },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-        modifier = Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        modifier = Modifier
+            .settingsLockAppearance(locked)
+            .clickable(enabled = active, role = Role.Button) {
+                if (locked) showSettingsLocked(context) else onClick()
+            },
     )
+}
+
+private fun Modifier.settingsLockAppearance(locked: Boolean): Modifier =
+    if (!locked) this
+    else alpha(0.38f).semantics { stateDescription = "投屏期间不可修改" }
+
+private fun showSettingsLocked(context: Context) {
+    Toast.makeText(context, "投屏期间此项已禁用", Toast.LENGTH_SHORT).show()
 }
 
 @Composable
