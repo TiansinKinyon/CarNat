@@ -13,10 +13,6 @@ internal data class CarPlayResolution(val width: Int, val height: Int, val maxFp
         width == other.width && height == other.height && frameRate == other.frameRate
 }
 
-internal class CarPlayDisplayChangedException(resolution: CarPlayResolution) : ProtocolException(
-    "车机显示参数已变更为 ${resolution.width}×${resolution.height} / ${resolution.frameRate} fps，请重新开始投屏",
-)
-
 internal data class CarPlayDisplay(val uuid: String, val resolution: CarPlayResolution) {
     companion object {
         const val MAIN_SCREEN = 110

@@ -60,6 +60,9 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
         MonitoringSection("车机 CarPlay") {
             Metric("请求分辨率", resolutionLabel(receiver.resolution?.width, receiver.resolution?.height))
             Metric("车机帧率上限", receiver.resolution?.maxFps?.let { "$it fps" })
+            if (capture.receiverDisplayChanged) {
+                Text("车机显示参数已变更。当前投屏沿用原画面，重新开始投屏后应用新参数。")
+            }
             Metric("Wi-Fi SSID", wifi?.ssid)
             ListItem(
                 headlineContent = { Text("Wi-Fi 密码") },

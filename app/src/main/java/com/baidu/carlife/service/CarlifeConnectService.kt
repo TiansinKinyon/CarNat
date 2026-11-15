@@ -39,7 +39,6 @@ import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
-import com.baidu.carlife.xiaomi.carplay.CarPlayDisplayChangedException
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
 import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
 import java.io.IOException
@@ -100,8 +99,14 @@ class CarlifeConnectService : Service() {
                         onResolution = { resolution ->
                             if (expectedResolution == null) {
                                 probedResolution = resolution
-                            } else if (!expectedResolution.matchesEncoderSettings(resolution)) {
-                                throw CarPlayDisplayChangedException(resolution)
+                            } else {
+                                val changed = !expectedResolution.matchesEncoderSettings(resolution)
+                                projectionScope.launch {
+                                    if (receiverProbe === probe) {
+                                        mutableState.update { it.copy(receiverDisplayChanged = changed) }
+                                    }
+                                }
+                                if (changed) Log.i(TAG, "Receiver display changed; keeping the active CarWith capture")
                             }
                         },
                         onDiagnostics = { diagnostics ->
@@ -124,7 +129,7 @@ class CarlifeConnectService : Service() {
                 if (receiverProbe === probe) {
                     Log.i("CarNatIap2", "Receiver session ended", failure)
                     val message = failure.message ?: "投屏连接失败"
-                    if (!streamed || failure is CarPlayDisplayChangedException) {
+                    if (!streamed) {
                         worker.post { capture.fail(message) }
                     } else {
                         mutableState.update { it.copy(receiverStatus = message) }
@@ -188,7 +193,9 @@ class CarlifeConnectService : Service() {
                 session = null
                 main.post {
                     stopping = false
-                    mutableState.update { it.copy(phase = CapturePhase.STOPPED, receiverStatus = null) }
+                    mutableState.update {
+                        it.copy(phase = CapturePhase.STOPPED, receiverStatus = null, receiverDisplayChanged = false)
+                    }
                     if (stopSelfResult(startId)) stopForeground(STOP_FOREGROUND_REMOVE)
                 }
             }
@@ -687,7 +694,7 @@ class CarlifeConnectService : Service() {
                     it.copy(
                         phase = if (it.phase == CapturePhase.FAILED) CapturePhase.FAILED else CapturePhase.STOPPED,
                         frames = frames, bytes = bytes, outputFps = null, outputMbps = null,
-                        outputWidth = null, outputHeight = null, displayId = null,
+                        outputWidth = null, outputHeight = null, displayId = null, receiverDisplayChanged = false,
                     )
                 }
             }
@@ -812,6 +819,7 @@ data class CaptureStatus(
     val avcKeyFrameBytes: Int? = null,
     val error: String? = null,
     val receiverStatus: String? = null,
+    val receiverDisplayChanged: Boolean = false,
     val outputWidth: Int? = null,
     val outputHeight: Int? = null,
     val outputFps: Double? = null,

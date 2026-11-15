@@ -103,7 +103,7 @@ internal object CarPlayScreenProbe {
                         }
                     }, "CarPlay connection heartbeat").apply { isDaemon = true; start() }
                     try {
-                        return sendVideo(video, keys.video(connectionId), resolution, onStreamStarted, onStage)
+                        return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
                     } finally {
                         heartbeat.interrupt()
                     }
@@ -172,7 +172,6 @@ internal object CarPlayScreenProbe {
     private fun sendVideo(
         video: Socket,
         key: ByteArray,
-        resolution: CarPlayResolution,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
     ): String {
@@ -204,9 +203,7 @@ internal object CarPlayScreenProbe {
                     nextReport = now + 5_000
                 }
                 val frame = feed.poll(200) ?: continue
-                if (frame.width != resolution.width || frame.height != resolution.height) {
-                    throw ProtocolException("CarWith frames do not match the CarPlay display resolution")
-                }
+                // The AVC configuration describes the actual capture, even after a receiver resize.
                 val writeStarted = SystemClock.elapsedRealtime()
                 frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
                 if (frames == 0) {
