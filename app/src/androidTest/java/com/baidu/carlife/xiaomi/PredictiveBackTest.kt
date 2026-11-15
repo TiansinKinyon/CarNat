@@ -13,6 +13,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.navigationevent.NavigationEvent
 import androidx.navigationevent.NavigationEventInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,6 +22,14 @@ import org.junit.runner.RunWith
 class PredictiveBackTest {
     @get:Rule
     val compose = createAndroidComposeRule<MainActivity>()
+
+    @Before
+    fun dismissStartupDialogs() {
+        compose.onNodeWithText("安全驾驶须知").assertIsDisplayed()
+        tap("确定")
+        compose.onNodeWithText("免责声明").assertIsDisplayed()
+        tap("确定")
+    }
 
     @Test
     fun cancelledBackKeepsTabsAndSettingsDetailInteractive() {
