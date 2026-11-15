@@ -37,6 +37,7 @@ internal class BluetoothReceiverProbe(
         onResolution: (CarPlayResolution) -> Unit = {},
         onDiagnostics: (ReceiverDiagnostics) -> Unit = {},
         readResolutionOnly: Boolean = false,
+        onReconnecting: () -> Unit = {},
         onStage: (String) -> Unit,
     ) {
         try {
@@ -61,6 +62,7 @@ internal class BluetoothReceiverProbe(
                 if (readResolutionOnly || !captureReady()) break
                 if (streamed) reconnectUntil = SystemClock.elapsedRealtime() + 90_000
                 if (SystemClock.elapsedRealtime() >= reconnectUntil) break
+                if (streamed) onReconnecting()
             }
         } finally {
             close()

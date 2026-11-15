@@ -98,7 +98,23 @@ class CarlifeConnectService : Service() {
                             streamed = true
                             timeout.cancel()
                             projectionScope.launch {
-                                if (receiverProbe === probe) dismissConnectingNotification()
+                                if (receiverProbe === probe) {
+                                    dismissConnectingNotification()
+                                    startForeground(
+                                        NOTIFICATION_ID,
+                                        projectionNotification("CarNat 连接成功", "正在投屏到车机"),
+                                    )
+                                }
+                            }
+                        },
+                        onReconnecting = {
+                            projectionScope.launch {
+                                if (receiverProbe === probe) {
+                                    startForeground(
+                                        NOTIFICATION_ID,
+                                        projectionNotification("CarNat 正在重连", "正在等待车机重新连接"),
+                                    )
+                                }
                             }
                         },
                         receiverAddress = settings.receiverAddress,
@@ -147,6 +163,12 @@ class CarlifeConnectService : Service() {
                 if (receiverProbe === probe) {
                     receiverProbe = null
                     dismissConnectingNotification()
+                    if (streamed) {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            projectionNotification("CarNat 连接已断开", "点按返回 CarNat"),
+                        )
+                    }
                     mutableReceiverDiagnostics.value = ReceiverDiagnostics()
                     probedResolution?.let(::prepareCarWithLaunch)
                 }
@@ -213,7 +235,7 @@ class CarlifeConnectService : Service() {
         if (intent?.action == diagnosticToken) {
             if (!stopping && !mutableState.value.active) {
                 clearLaunchTicket(this)
-                startForeground(NOTIFICATION_ID, diagnosticNotification())
+                startForeground(NOTIFICATION_ID, projectionNotification())
                 mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
                 val capture = CaptureSession()
                 worker.post { session = capture }
@@ -237,14 +259,14 @@ class CarlifeConnectService : Service() {
             consumeLaunchTicket(this)
         } else null
         if (intent != null && resolution != null) {
-            startForeground(NOTIFICATION_ID, diagnosticNotification())
+            startForeground(NOTIFICATION_ID, projectionNotification())
             val connectionType = intent.getIntExtra("usb_type", -1)
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
             showConnectingNotification()
             beginCapture(connectionType, resolution)
         } else if (!mutableState.value.active) {
             // Even a declined external start must satisfy startForegroundService's contract.
-            startForeground(NOTIFICATION_ID, diagnosticNotification())
+            startForeground(NOTIFICATION_ID, projectionNotification())
             stopSelfResult(startId)
         }
         return START_NOT_STICKY
@@ -333,7 +355,10 @@ class CarlifeConnectService : Service() {
     )
 
     @Suppress("DEPRECATION")
-    private fun diagnosticNotification(): Notification {
+    private fun projectionNotification(
+        title: String = "CarNat 正在连接",
+        message: String = "正在准备 CarPlay 投屏",
+    ): Notification {
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "CarWith 投屏诊断", NotificationManager.IMPORTANCE_LOW),
@@ -342,10 +367,11 @@ class CarlifeConnectService : Service() {
         } else {
             Notification.Builder(this)
         }
-        return builder.setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("CarNat")
-            .setContentText("CarWith 投屏诊断正在运行")
+        return builder.setSmallIcon(R.drawable.ic_cast)
+            .setContentTitle(title)
+            .setContentText(message)
             .setContentIntent(openCarNatIntent())
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .build()
     }
