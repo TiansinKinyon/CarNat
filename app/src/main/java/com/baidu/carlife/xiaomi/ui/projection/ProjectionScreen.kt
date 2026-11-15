@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,6 +53,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.baidu.carlife.service.CapturePhase
@@ -189,27 +192,25 @@ private fun ProjectionContent(
                 ),
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top,
                 ) {
-                    Icon(
-                        painterResource(R.drawable.ic_mobile_cast),
-                        contentDescription = "手机投屏",
-                        modifier = Modifier.size(32.dp),
+                    ProjectionNode("CarWith", R.drawable.ic_mobile_cast, Modifier.weight(1.5f))
+                    ProjectionLink(
+                        label = "CarWith 到 CarNat",
+                        active = supported && status.active,
+                        status = ProjectionLinkStatus.PENDING,
+                        modifier = Modifier.weight(1f),
                     )
-                    ProjectionLink(supported && status.active, Modifier.weight(1f))
-                    Icon(
-                        painterResource(R.drawable.ic_extension),
-                        contentDescription = "CarNat",
-                        modifier = Modifier.size(32.dp),
+                    ProjectionNode("CarNat", R.drawable.ic_extension, Modifier.weight(1.5f))
+                    ProjectionLink(
+                        label = "CarNat 到 Carplay",
+                        active = supported && status.active,
+                        status = ProjectionLinkStatus.PENDING,
+                        modifier = Modifier.weight(1f),
                     )
-                    ProjectionLink(supported && status.active, Modifier.weight(1f))
-                    Icon(
-                        painterResource(R.drawable.ic_car_gear),
-                        contentDescription = "车机",
-                        modifier = Modifier.size(32.dp),
-                    )
+                    ProjectionNode("Carplay", R.drawable.ic_car_gear, Modifier.weight(1.5f))
                 }
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
@@ -256,13 +257,52 @@ private fun ProjectionContent(
 }
 
 @Composable
-private fun ProjectionLink(active: Boolean, modifier: Modifier) {
+private fun ProjectionNode(label: String, @DrawableRes icon: Int, modifier: Modifier) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(painterResource(icon), contentDescription = null, modifier = Modifier.size(32.dp))
+        Box(Modifier.heightIn(min = 20.dp), contentAlignment = Alignment.Center) {
+            Text(label, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center)
+        }
+    }
+}
+
+private enum class ProjectionLinkStatus(@get:DrawableRes val icon: Int, val description: String) {
+    PENDING(R.drawable.ic_more_horiz, "未连接"),
+    CONNECTED(R.drawable.ic_check_circle, "已连接"),
+    FAILED(R.drawable.ic_error, "连接失败"),
+}
+
+@Composable
+private fun ProjectionLink(
+    label: String,
+    active: Boolean,
+    status: ProjectionLinkStatus,
+    modifier: Modifier,
+) {
     val color = MaterialTheme.colorScheme.onSecondaryContainer
     val track = color.copy(alpha = 0.18f)
-    if (active) {
-        LinearProgressIndicator(modifier.height(4.dp), color = color, trackColor = track)
-    } else {
-        Box(modifier.height(4.dp).background(track, RoundedCornerShape(50)))
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.fillMaxWidth().height(32.dp), contentAlignment = Alignment.Center) {
+            val indicator = Modifier.fillMaxWidth().height(4.dp)
+            if (active) {
+                LinearProgressIndicator(indicator, color = color, trackColor = track)
+            } else {
+                Box(indicator.background(track, RoundedCornerShape(50)))
+            }
+        }
+        Icon(
+            painterResource(status.icon),
+            contentDescription = "$label：${status.description}",
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
