@@ -52,7 +52,13 @@ internal fun HelpScreen() {
                     "※ 部分车机可能需要预先手动连接热点，请打开车机的热点并在手机上完成连接，然后再发起连接请求。",
         )
 
-
+        HelpSection(
+            "加快连接速度",
+            "由于 CarWith 在启动时会先强行停止 CarLife 组件（CarNat），然后再重新启动。为实现跟随车机的分辨率与帧率设置，会经历以下流程：\n\n" +
+                    "CarNat 连接到 CarPlay，获取分辨率和帧率信息 -> CarWith 启动导致 CarNat 重启，CarPlay 断开 -> CarNat 重连 Carplay，传输 CarWith 视频\n\n" +
+                    "为加快连接速度，可以在 设置 页面自定义分辨率和帧率。当应用自定义分辨率和帧率时，会先启动 CarWith，然后再连接 Carplay。这样会减少一次连接，速度会更快。\n" +
+                    "可以在 检测 页面找到车机的 请求分辨率、接收帧率上限，作为参考。",
+        )
     }
 }
 
