@@ -3,8 +3,7 @@ package com.baidu.carlife.xiaomi.carplay
 import android.content.Context
 
 internal data class ReceiverSettings(val name: String = "", val address: String = "", val pin: String = "", val receiverAddress: String = "") {
-    val valid: Boolean get() = name.isNotBlank() && CarPlayScreenProbe.bluetoothAddress.matches(address.trim()) &&
-        (pin.isEmpty() || pin.length <= 16 && pin.count { it in '0'..'9' } >= 4 && pin.all { it in '0'..'9' || it == '-' })
+    val valid: Boolean get() = name.isNotBlank() && validAddress(address) && validPin(pin)
 
     fun saveReceiver(context: Context): Boolean = preferences(context).edit()
         .putString("name", name).putString("receiverAddress", receiverAddress).commit()
@@ -15,6 +14,16 @@ internal data class ReceiverSettings(val name: String = "", val address: String 
         .putString("name", name.trim()).putString("receiverAddress", receiverAddress).putString("address", address.trim()).putString("pin", pin).commit()
 
     companion object {
+        fun validAddress(value: String): Boolean {
+            val address = value.trim()
+            return CarPlayScreenProbe.bluetoothAddress.matches(address) &&
+                address != "02:00:00:00:00:00" && address != "00:00:00:00:00:00"
+        }
+
+        fun validPin(value: String): Boolean = value.isEmpty() ||
+            value.length <= 16 && value.count { it in '0'..'9' } >= 4 &&
+            value.all { it in '0'..'9' || it == '-' }
+
         private fun preferences(context: Context) = context.getSharedPreferences("receiver_settings", Context.MODE_PRIVATE)
 
         fun load(context: Context): ReceiverSettings = preferences(context).let {

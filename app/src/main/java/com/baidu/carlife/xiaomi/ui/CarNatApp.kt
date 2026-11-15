@@ -56,6 +56,7 @@ import com.baidu.carlife.xiaomi.ui.help.HelpScreen
 import com.baidu.carlife.xiaomi.ui.monitoring.MonitoringScreen
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionReadyPreviewContent
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionScreen
+import com.baidu.carlife.xiaomi.ui.settings.DeveloperSettingsScreen
 import com.baidu.carlife.xiaomi.ui.settings.SettingEntry
 import com.baidu.carlife.xiaomi.ui.settings.SettingsScreen
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
@@ -120,7 +121,7 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
                         Destination.CONNECT -> connectionPage(active)
                         Destination.HELP -> HelpScreen()
                         Destination.MONITORING -> MonitoringScreen(active)
-                        Destination.SETTINGS -> SettingsScreen { setting ->
+                        Destination.SETTINGS -> SettingsScreen(active) { setting ->
                             if (active) navController.navigate(setting.route) { launchSingleTop = true }
                         }
                     }
@@ -133,7 +134,9 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
                     entry = entry,
                     title = setting.title,
                     onBack = { navController.popBackStack() },
-                )
+                ) { active ->
+                    DeveloperSettingsScreen(active)
+                }
             }
         }
     }

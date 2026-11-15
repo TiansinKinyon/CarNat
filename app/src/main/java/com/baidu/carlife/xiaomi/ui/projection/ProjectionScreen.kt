@@ -54,7 +54,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -72,7 +71,6 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val status by CarlifeConnectService.state.collectAsState()
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
-    var showCustomCode by remember { mutableStateOf(settings.pin.isNotBlank()) }
     var error by remember { mutableStateOf<String?>(null) }
     var devices by remember { mutableStateOf<List<PairedReceiver>?>(null) }
     var expanded by remember { mutableStateOf(false) }
@@ -91,8 +89,12 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         val receiver = pairedReceivers(context)?.firstOrNull {
             it.address.equals(settings.receiverAddress, ignoreCase = true)
         }
-        error = if (receiver == null) "请开启蓝牙并选择已配对的接收端"
-        else startProjection(context, settings.copy(name = receiver.name))
+        val current = ReceiverSettings.load(context)
+        error = when {
+            receiver == null -> "请开启蓝牙并选择已配对的接收端"
+            !ReceiverSettings.validAddress(current.address) -> "请在设置 → 开发者选项填写本机蓝牙地址"
+            else -> startProjection(context, current.copy(name = receiver.name))
+        }
     }
     val notificationPermissions = remember(context) {
         context.getSharedPreferences("projection_notifications", Context.MODE_PRIVATE)
@@ -108,7 +110,6 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         modifier = modifier,
         status = status,
         settings = settings,
-        showCustomCode = showCustomCode,
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
         receiverPicker = {
@@ -137,11 +138,6 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
                 },
             )
         },
-        onSettingsChange = { settings = it },
-        onToggleCustomCode = {
-            showCustomCode = !showCustomCode
-            if (!showCustomCode) settings = settings.copy(pin = "")
-        },
         onProjectionClick = {
             error = null
             if (status.active) {
@@ -165,12 +161,9 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
 private fun ProjectionContent(
     status: CaptureStatus,
     settings: ReceiverSettings,
-    showCustomCode: Boolean,
     error: String?,
     supported: Boolean,
     receiverPicker: @Composable () -> Unit,
-    onSettingsChange: (ReceiverSettings) -> Unit,
-    onToggleCustomCode: () -> Unit,
     onProjectionClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -248,24 +241,10 @@ private fun ProjectionContent(
                 }
                 ProjectionStatusMessage(message, receiverLink)
             }
-            if (supported) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    receiverPicker()
-                    if (!status.active) {
-                        OutlinedTextField(settings.address, { onSettingsChange(settings.copy(address = it)) },
-                            label = { Text("本机蓝牙地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                        TextButton(onClick = onToggleCustomCode) { Text(if (showCustomCode) "使用默认网络配对码" else "使用自定义网络配对码") }
-                        if (showCustomCode) {
-                            OutlinedTextField(settings.pin, { onSettingsChange(settings.copy(pin = it.take(16))) },
-                                label = { Text("网络配对码") }, visualTransformation = PasswordVisualTransformation(),
-                                singleLine = true, modifier = Modifier.fillMaxWidth())
-                        }
-                    }
-                }
-            }
+            if (supported) receiverPicker()
         }
         if (supported) {
-            val enabled = status.active || (settings.valid && settings.receiverAddress.isNotBlank())
+            val enabled = status.active || settings.receiverAddress.isNotBlank()
             ExtendedFloatingActionButton(
                 onClick = { if (enabled) onProjectionClick() },
                 modifier = Modifier.align(Alignment.BottomEnd)
@@ -409,7 +388,6 @@ private fun ProjectionPreviewContent(status: CaptureStatus) {
     ProjectionContent(
         status = status,
         settings = ReceiverSettings(name = "CarPlay 接收端", address = "02:12:34:56:78:90", receiverAddress = "02:00:00:00:00:01"),
-        showCustomCode = false,
         error = null,
         supported = true,
         receiverPicker = {
@@ -424,8 +402,6 @@ private fun ProjectionPreviewContent(status: CaptureStatus) {
                 onSelect = {},
             )
         },
-        onSettingsChange = {},
-        onToggleCustomCode = {},
         onProjectionClick = {},
     )
 }

@@ -15,6 +15,8 @@ internal object CarPlayReceiverProbe {
         onStreamStarted: () -> Unit = {},
         onResolution: (CarPlayResolution) -> Unit = {},
         readResolutionOnly: Boolean = false,
+        preferences: ProjectionPreferences = ProjectionPreferences(),
+        onAudio: (Boolean, CarPlayAudioInfo) -> Unit = { _, _ -> },
         onStage: (String) -> Unit,
     ): String {
         sockets.open().use { socket ->
@@ -43,7 +45,7 @@ internal object CarPlayReceiverProbe {
                     }
                     return CarPlayScreenProbe.run(
                         socket.inetAddress, control, info.body, deviceId, keys, bluetoothCertificate,
-                        sockets, onStreamStarted, onResolution, onStage,
+                        sockets, onStreamStarted, onResolution, preferences, onAudio, onStage,
                     )
                 }
                 return "接收端身份验证通过 · /info ${info.body.size} 字节"

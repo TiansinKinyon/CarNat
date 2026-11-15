@@ -49,6 +49,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.UUID
 import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
+import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
 import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
@@ -74,6 +75,7 @@ class CarlifeConnectService : Service() {
     @android.annotation.SuppressLint("MissingPermission")
     private fun startReceiver(capture: CaptureSession, expectedResolution: CarPlayResolution? = null) {
         val readResolutionOnly = expectedResolution == null
+        val preferences = ProjectionPreferences.load(this)
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         if (!settings.valid || adapter == null || missingReceiverPermissions(this).isNotEmpty()) {
@@ -122,11 +124,12 @@ class CarlifeConnectService : Service() {
                         },
                         receiverAddress = settings.receiverAddress,
                         readResolutionOnly = readResolutionOnly,
+                        preferences = preferences,
                         onResolution = { resolution ->
                             if (expectedResolution == null) {
                                 probedResolution = resolution
                             } else {
-                                val changed = !expectedResolution.matchesEncoderSettings(resolution)
+                                val changed = !expectedResolution.matchesEncoderSettings(preferences.applyTo(resolution))
                                 projectionScope.launch {
                                     if (receiverProbe === probe) {
                                         mutableState.update { it.copy(receiverDisplayChanged = changed) }
@@ -294,12 +297,16 @@ class CarlifeConnectService : Service() {
     }
 
     private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
-        val capture = CaptureSession(resolution)
+        val preferences = ProjectionPreferences.load(this)
+        val encoderResolution = preferences.applyTo(resolution)
+        val capture = CaptureSession(encoderResolution, preferences.videoBitrateKbps)
         main.removeCallbacks(armTimeout)
         mutableState.update {
             it.copy(
                 phase = CapturePhase.BINDING,
                 connectionType = connectionType,
+                targetVideoBitrateKbps = preferences.videoBitrateKbps,
+                encoderFpsLimit = encoderResolution.frameRate,
                 receiverStatus = "正在准备 CarWith 画面",
             )
         }
@@ -307,7 +314,7 @@ class CarlifeConnectService : Service() {
             session = capture
             capture.bind()
         }
-        startReceiver(capture, expectedResolution = resolution)
+        startReceiver(capture, expectedResolution = encoderResolution)
     }
 
     private fun failCarWithStartup(message: String) {
@@ -386,7 +393,10 @@ class CarlifeConnectService : Service() {
             .build()
     }
 
-    private inner class CaptureSession(private val resolution: CarPlayResolution? = null) : ServiceConnection {
+    private inner class CaptureSession(
+        private val resolution: CarPlayResolution? = null,
+        private val videoBitrateKbps: Int = ProjectionPreferences.DEFAULT_BITRATE_KBPS,
+    ) : ServiceConnection {
         private var manager: ICarLifeCastManager? = null
         private var codec: MediaCodec? = null
         private var surface: Surface? = null
@@ -646,7 +656,7 @@ class CarlifeConnectService : Service() {
         private fun startEncoder(size: CarPlayResolution): Surface {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 4_000_000)
+            format.setInteger(MediaFormat.KEY_BIT_RATE, videoBitrateKbps * 1_000)
             format.setInteger(MediaFormat.KEY_FRAME_RATE, size.frameRate)
             if (Build.VERSION.SDK_INT >= 29) {
                 format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, size.frameRate.toFloat())
@@ -913,6 +923,8 @@ data class CaptureStatus(
     val outputHeight: Int? = null,
     val outputFps: Double? = null,
     val outputMbps: Double? = null,
+    val targetVideoBitrateKbps: Int? = null,
+    val encoderFpsLimit: Int? = null,
 ) {
     val active: Boolean
         get() = phase.isActive

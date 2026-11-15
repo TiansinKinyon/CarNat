@@ -28,6 +28,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CaptureStatus
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.xiaomi.carplay.CarPlayAudioInfo
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
 import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
 import com.baidu.carlife.xiaomi.carplay.ReceiverWifi
@@ -51,8 +52,10 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
     ) {
         MonitoringSection("CarWith") {
             Metric("输出分辨率", resolutionLabel(capture.outputWidth, capture.outputHeight))
+            Metric("编码帧率上限", capture.encoderFpsLimit?.let { "$it fps" })
             Metric("实时帧率", capture.outputFps?.let { "%.1f fps".format(it) })
-            Metric("视频码率", capture.outputMbps?.let { "%.2f Mbps".format(it) })
+            Metric("视频目标码率", capture.targetVideoBitrateKbps?.let { "$it kbps" })
+            Metric("视频实测码率", capture.outputMbps?.let { "%.2f Mbps".format(it) })
             Metric("累计输出帧数", capture.frames.takeIf { capture.outputFps != null || it > 0 }?.toString())
             Metric("虚拟屏 ID", capture.displayId?.toString())
         }
@@ -63,7 +66,30 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
             if (capture.receiverDisplayChanged) {
                 Text("车机显示参数已变更。当前投屏沿用原画面，重新开始投屏后应用新参数。")
             }
+            Metric("连接状态", capture.error ?: capture.receiverStatus)
+        }
+
+        MonitoringSection("CarPlay 音频") {
+            AudioMetrics("媒体", receiver.mediaAudio)
+            AudioMetrics("导航", receiver.navigationAudio)
+        }
+
+        MonitoringSection("蓝牙与 Wi-Fi") {
+            Metric("接收端蓝牙名称", receiver.receiverName)
+            Metric("接收端蓝牙地址", receiver.receiverAddress)
+            Metric("本机蓝牙地址", receiver.phoneAddress)
+            Metric("蓝牙传输", receiver.receiverAddress?.let { "经典蓝牙 · RFCOMM / iAP2" })
             Metric("Wi-Fi SSID", wifi?.ssid)
+            Metric("Wi-Fi 加密", wifi?.let {
+                when (it.security) {
+                    0 -> "开放"
+                    2 -> "WPA/WPA2"
+                    3 -> "WPA2/WPA3 过渡模式"
+                    4 -> "WPA3"
+                    else -> "类型 ${it.security}"
+                }
+            })
+            Metric("热点信道", wifi?.channel?.toString())
             ListItem(
                 headlineContent = { Text("Wi-Fi 密码") },
                 supportingContent = {
@@ -85,9 +111,19 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             )
-            Metric("连接状态", capture.error ?: capture.receiverStatus)
+            Metric("车机地址", receiver.host)
+            Metric("CarPlay 控制端口", receiver.port?.toString())
+            Metric("投屏网络接口", receiver.wifiInterface)
+            Metric("手机投屏 IP", receiver.phoneIps.takeIf { it.isNotEmpty() }?.joinToString("\n"))
         }
     }
+}
+
+@Composable
+private fun AudioMetrics(label: String, stream: CarPlayAudioInfo?) {
+    Metric("${label}音频格式", stream?.let { "${it.codec} · ${it.sampleRate} Hz · ${it.channels} 声道" })
+    Metric("${label}缓冲请求", stream?.let { "${it.bufferMs} ms" })
+    Metric("$label UDP 端口", stream?.port?.toString())
 }
 
 @Composable
@@ -127,6 +163,8 @@ private fun MonitoringPreview() {
                 outputWidth = 1920,
                 outputHeight = 766,
                 outputFps = 29.8,
+                encoderFpsLimit = 60,
+                targetVideoBitrateKbps = 4_000,
                 outputMbps = 3.84,
                 receiverStatus = "正在投屏",
             ),

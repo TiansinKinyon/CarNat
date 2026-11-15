@@ -35,6 +35,8 @@ internal object CarPlayScreenProbe {
         sockets: CarPlaySockets,
         onStreamStarted: () -> Unit,
         onResolution: (CarPlayResolution) -> Unit,
+        preferences: ProjectionPreferences,
+        onAudio: (Boolean, CarPlayAudioInfo) -> Unit,
         onStage: (String) -> Unit,
     ): String = CarPlayTiming(host, sockets.openDatagram()).use { timing ->
         require(bluetoothAddress.matches(deviceId))
@@ -76,8 +78,8 @@ internal object CarPlayScreenProbe {
             } ?: throw ProtocolException("接收端未返回主屏流")
             val dataPort = port(screen, "dataPort")
             connect(sockets, host, dataPort).use { video ->
-                openAudio(receiverInfo, host, control, keys, sockets, navigation = false).use { audio ->
-                    openAudio(receiverInfo, host, control, keys, sockets, navigation = true).use { navigation ->
+                openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = false).use { audio ->
+                    openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = true).use { navigation ->
                         request(control, "RECORD", "/", NSDictionary())
                         audio?.start()
                         navigation?.start()
@@ -115,7 +117,8 @@ internal object CarPlayScreenProbe {
 
     private fun openAudio(
         info: NSDictionary, host: InetAddress, control: RtspControl, keys: CarPlaySessionKeys,
-        sockets: CarPlaySockets, navigation: Boolean,
+        sockets: CarPlaySockets, preferences: ProjectionPreferences,
+        onAudio: (Boolean, CarPlayAudioInfo) -> Unit, navigation: Boolean,
     ): CarPlayMediaAudio? {
         val formats = info.objectForKey("audioFormats") as? NSArray ?: return null
         val audioType = if (navigation) "alert" else "media"
@@ -127,26 +130,36 @@ internal object CarPlayScreenProbe {
         }?.let { (it.objectForKey("audioOutputFormats") as? NSNumber)?.intValue() } ?: 0
         val aacMask = mask(CarPlayMediaAudio.AAC_TYPE)
         val pcmMask = mask(CarPlayMediaAudio.PCM_TYPE)
+        val mediaAac = when {
+            aacMask and 0x800000 != 0 -> 0x800000 to 48_000
+            aacMask and 0x400000 != 0 -> 0x400000 to 44_100
+            else -> null
+        }
+        val mediaPcm = when {
+            pcmMask and 0x800 != 0 -> 0x800 to 44_100
+            pcmMask and 0x8000 != 0 -> 0x8000 to 48_000
+            else -> null
+        }
         val (format, rate) = if (navigation) when {
             pcmMask and 0x4000 != 0 -> 0x4000 to 48_000
             pcmMask and 0x400 != 0 -> 0x400 to 44_100
             pcmMask and 0x10 != 0 -> 0x10 to 16_000
             else -> return null
-        } else when {
-            aacMask and 0x800000 != 0 -> 0x800000 to 48_000
-            aacMask and 0x400000 != 0 -> 0x400000 to 44_100
-            pcmMask and 0x800 != 0 -> 0x800 to 44_100
-            pcmMask and 0x8000 != 0 -> 0x8000 to 48_000
-            else -> return null
+        } else {
+            (if (preferences.audioPreference == AudioPreference.PCM) mediaPcm ?: mediaAac
+            else mediaAac ?: mediaPcm) ?: return null
         }
         val aac = format >= 0x400000
+        val bufferMs = if (navigation) preferences.navigationBufferMs ?: 100
+            else preferences.mediaBufferMs ?: if (aac) 350 else 120
+        val channels = if (navigation) 1 else 2
         val type = if (aac) CarPlayMediaAudio.AAC_TYPE else CarPlayMediaAudio.PCM_TYPE
         val id = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
         val stream = NSDictionary().apply {
             put("type", type)
             put("audioType", audioType)
             put("audioFormat", format)
-            put("audioLatencyMs", if (navigation) 100 else if (aac) 350 else 120)
+            put("audioLatencyMs", bufferMs)
             put("streamConnectionID", id)
         }
         val body = NSDictionary().apply {
@@ -164,9 +177,13 @@ internal object CarPlayScreenProbe {
             (it.objectForKey("type") as? NSNumber)?.intValue() == type &&
                 (it.objectForKey("streamConnectionID") as? NSNumber)?.longValue()?.let { it == id } != false
         } ?: return null
-        return CarPlayMediaAudio(sockets.openDatagram(), host, port(response, "dataPort"), keys.video(id), rate, aac,
-            stream = if (navigation) 2 else 1, outputChannels = if (navigation) 1 else 2,
-        )
+        val dataPort = port(response, "dataPort")
+        return CarPlayMediaAudio(
+            sockets.openDatagram(), host, dataPort, keys.video(id), rate, aac,
+            stream = if (navigation) 2 else 1, outputChannels = channels,
+        ).also {
+            onAudio(navigation, CarPlayAudioInfo(if (aac) "AAC-LC" else "PCM", rate, channels, bufferMs, dataPort))
+        }
     }
 
     private fun sendVideo(

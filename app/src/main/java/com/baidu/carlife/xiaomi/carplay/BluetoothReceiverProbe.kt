@@ -16,6 +16,23 @@ import java.util.UUID
 internal data class ReceiverDiagnostics(
     val resolution: CarPlayResolution? = null,
     val wifi: ReceiverWifi? = null,
+    val receiverName: String? = null,
+    val receiverAddress: String? = null,
+    val phoneAddress: String? = null,
+    val host: String? = null,
+    val port: Int? = null,
+    val wifiInterface: String? = null,
+    val phoneIps: List<String> = emptyList(),
+    val mediaAudio: CarPlayAudioInfo? = null,
+    val navigationAudio: CarPlayAudioInfo? = null,
+)
+
+internal data class CarPlayAudioInfo(
+    val codec: String,
+    val sampleRate: Int,
+    val channels: Int,
+    val bufferMs: Int,
+    val port: Int,
 )
 
 internal class BluetoothReceiverProbe(
@@ -37,6 +54,7 @@ internal class BluetoothReceiverProbe(
         onResolution: (CarPlayResolution) -> Unit = {},
         onDiagnostics: (ReceiverDiagnostics) -> Unit = {},
         readResolutionOnly: Boolean = false,
+        preferences: ProjectionPreferences = ProjectionPreferences(),
         onReconnecting: () -> Unit = {},
         onStage: (String) -> Unit,
     ) {
@@ -50,7 +68,7 @@ internal class BluetoothReceiverProbe(
                     runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, receiverAddress, {
                         streamed = true
                         onStreamStarted()
-                    }, onResolution, onDiagnostics, readResolutionOnly, onStage)
+                    }, onResolution, onDiagnostics, readResolutionOnly, preferences, onStage)
                 } catch (error: IOException) {
                     if (closed) return
                     if (!captureReady() || (!streamed && SystemClock.elapsedRealtime() >= reconnectUntil)) throw error
@@ -81,6 +99,7 @@ internal class BluetoothReceiverProbe(
         onResolution: (CarPlayResolution) -> Unit,
         onDiagnostics: (ReceiverDiagnostics) -> Unit,
         readResolutionOnly: Boolean,
+        preferences: ProjectionPreferences,
         onStage: (String) -> Unit,
     ) {
         val attempt = CarPlaySockets()
@@ -108,7 +127,8 @@ internal class BluetoothReceiverProbe(
         }
         onStage("蓝牙 RFCOMM 已连接")
         var accessPoint: ReceiverWifiRequest? = null
-        var diagnostics = ReceiverDiagnostics()
+        var diagnostics = ReceiverDiagnostics(receiverName = receiverName, receiverAddress = device.address, phoneAddress = deviceId)
+        onDiagnostics(diagnostics)
         fun publishWifi(wifi: ReceiverWifi) {
             if (diagnostics.wifi !== wifi) {
                 diagnostics = diagnostics.copy(wifi = wifi)
@@ -131,11 +151,19 @@ internal class BluetoothReceiverProbe(
             requestWifi(wifi)
         }, onStage)
         endpoint.wifi?.let(::publishWifi)
+        diagnostics = diagnostics.copy(host = endpoint.host, port = endpoint.port)
+        onDiagnostics(diagnostics)
         if (pin.isNotEmpty()) {
             endpoint.wifi?.let(::requestWifi)
             if (Build.VERSION.SDK_INT >= 29) accessPoint?.let { request ->
                 val network = request.awaitNetwork()
-                attempt.useNetwork(network, connectivity.getLinkProperties(network)?.interfaceName)
+                val link = connectivity.getLinkProperties(network)
+                attempt.useNetwork(network, link?.interfaceName)
+                diagnostics = diagnostics.copy(
+                    wifiInterface = link?.interfaceName,
+                    phoneIps = link?.linkAddresses?.mapNotNull { it.address.hostAddress }.orEmpty(),
+                )
+                onDiagnostics(diagnostics)
                 onStage("已连接车机 Wi-Fi")
             }
             onStage(CarPlayReceiverProbe.verify(
@@ -146,6 +174,11 @@ internal class BluetoothReceiverProbe(
                     onResolution(resolution)
                 },
                 readResolutionOnly = readResolutionOnly,
+                preferences = preferences,
+                onAudio = { navigation, info ->
+                    diagnostics = if (navigation) diagnostics.copy(navigationAudio = info) else diagnostics.copy(mediaAudio = info)
+                    onDiagnostics(diagnostics)
+                },
                 onStage = onStage,
             ))
         }
