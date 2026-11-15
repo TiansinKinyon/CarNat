@@ -56,7 +56,7 @@ internal fun ProjectionLogScreen(active: Boolean) {
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("最近记录", style = MaterialTheme.typography.titleLarge)
-        Text("导出目录为「下载/CarNat」。再次导出会替换上一份手动报告。异常退出报告会在下次启动时保存到同一目录。")
+        Text("导出目录为「Download/CarNat」。再次导出会替换上一份手动报告。异常退出报告会在下次启动时保存到同一目录。")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 enabled = active && !exporting && Build.VERSION.SDK_INT >= 29,
@@ -96,7 +96,7 @@ internal fun ProjectionLogScreen(active: Boolean) {
         if (message != null) {
             Text(message, color = MaterialTheme.colorScheme.error)
         } else if (exported != null) {
-            Text("已导出到「下载/CarNat」。", color = MaterialTheme.colorScheme.primary)
+            Text("已导出到「Download/CarNat」", color = MaterialTheme.colorScheme.primary)
         }
         Card(Modifier.fillMaxWidth()) {
             SelectionContainer {

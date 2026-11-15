@@ -79,8 +79,9 @@ class CarlifeConnectService : Service() {
         val preferences = ProjectionPreferences.load(this)
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
-        if (!settings.valid || adapter == null || missingReceiverPermissions(this).isNotEmpty()) {
-            ProjectionLog.event("接收端设置无效、蓝牙不可用或缺少附近设备权限")
+        val missingPermissions = missingReceiverPermissions(this)
+        if (!settings.valid || adapter == null || missingPermissions.isNotEmpty()) {
+            ProjectionLog.event("接收端前置检查失败 · settingsValid=${settings.valid} adapterPresent=${adapter != null} missingPermissions=$missingPermissions")
             worker.post { capture.fail("请检查接收端设置和附近设备权限") }
             return
         }
@@ -628,8 +629,12 @@ class CarlifeConnectService : Service() {
             try {
                 bound = bindService(Intent().setComponent(CAR_WITH_SERVICE), this, BIND_AUTO_CREATE)
                 if (bound) worker.postDelayed(timeout, 12_000)
-                else fail("CarWith cast service is unavailable")
+                else {
+                    ProjectionLog.event("CarWith bindService 返回 false")
+                    fail("CarWith cast service is unavailable")
+                }
             } catch (error: SecurityException) {
+                ProjectionLog.failure("CarWith 拒绝绑定投屏服务", error)
                 fail(error.message ?: "CarWith denied the service binding")
             }
         }
@@ -653,9 +658,11 @@ class CarlifeConnectService : Service() {
                 val inputSurface = startEncoder(size)
                 mutableState.update { it.copy(phase = CapturePhase.WAITING_FOR_FRAMES) }
                 worker.postDelayed(timeout, 12_000)
+                ProjectionLog.event("正在调用 CarWith 投屏接口")
                 remote.setCastCallback(callback)
                 remote.setSystemAudioCallback(audioCallback)
                 remote.prepareCast(CastConfig(size.width, size.height, DPI, inputSurface))
+                ProjectionLog.event("CarWith prepareCast 已返回，等待编码帧")
                 Log.i(TAG, "CarWith prepareCast: ${size.width}×${size.height}")
             } catch (error: Exception) {
                 ProjectionLog.failure("CarWith 投屏初始化失败", error)
@@ -665,13 +672,15 @@ class CarlifeConnectService : Service() {
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
-            worker.post { if (!closed) fail("CarWith disconnected") }
+            worker.post { if (!closed) fail("CarWith disconnected", "onServiceDisconnected") }
         }
 
-        override fun onBindingDied(name: ComponentName) = onServiceDisconnected(name)
+        override fun onBindingDied(name: ComponentName) {
+            worker.post { if (!closed) fail("CarWith binding died", "onBindingDied") }
+        }
 
         override fun onNullBinding(name: ComponentName) {
-            worker.post { if (!closed) fail("CarWith returned no cast interface") }
+            worker.post { if (!closed) fail("CarWith returned no cast interface", "onNullBinding") }
         }
 
         private fun startEncoder(size: CarPlayResolution): Surface {
@@ -684,6 +693,7 @@ class CarlifeConnectService : Service() {
             }
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
+            ProjectionLog.event("请求 AVC 编码器 · ${size.width}×${size.height}/${size.frameRate} fps · ${videoBitrateKbps} kbps")
             val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             codec = encoder
             encoder.setCallback(object : MediaCodec.Callback() {
@@ -693,13 +703,15 @@ class CarlifeConnectService : Service() {
                     val width = format.visibleDimension(MediaFormat.KEY_WIDTH, MediaFormat.KEY_CROP_LEFT, MediaFormat.KEY_CROP_RIGHT)
                     val height = format.visibleDimension(MediaFormat.KEY_HEIGHT, MediaFormat.KEY_CROP_TOP, MediaFormat.KEY_CROP_BOTTOM)
                     mutableState.update { it.copy(outputWidth = width, outputHeight = height) }
-                    val sps = format.getByteBuffer("csd-0") ?: return
+                    val sps = format.getByteBuffer("csd-0")
+                    ProjectionLog.event("AVC 输出格式 · ${width}×${height} · hasSps=${sps != null}")
+                    if (sps == null) return
                     readConfiguration(sps, format.getByteBuffer("csd-1"))
                 }
 
                 override fun onError(codec: MediaCodec, error: MediaCodec.CodecException) {
                     if (!closed) {
-                        ProjectionLog.failure("视频编码器异常", error)
+                        ProjectionLog.failure("视频编码器异常 · code=${error.errorCode} transient=${error.isTransient} recoverable=${error.isRecoverable}", error)
                         fail(error.diagnosticInfo)
                     }
                 }
@@ -713,6 +725,7 @@ class CarlifeConnectService : Service() {
                             codec.releaseOutputBuffer(index, false)
                         }
                     } catch (error: IllegalStateException) {
+                        ProjectionLog.failure("读取或释放 AVC 输出缓冲失败", error)
                         fail(error.message ?: "Could not release encoder output")
                         return
                     }
@@ -727,6 +740,7 @@ class CarlifeConnectService : Service() {
                     }
                 }
             }, worker)
+            ProjectionLog.event("配置 AVC 编码器 · ${encoder.name}")
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val inputSurface = encoder.createInputSurface()
             surface = inputSurface
@@ -780,8 +794,11 @@ class CarlifeConnectService : Service() {
             return if (containsKey(size)) getInteger(size).takeIf { it > 0 } else null
         }
 
-        fun fail(message: String) {
+        fun fail(message: String, reason: String? = null) {
             if (closed) return
+            val current = mutableState.value
+            ProjectionLog.event("投屏失败 · phase=${current.phase} displayReady=${current.displayId != null} encodedFrames=$frames" +
+                (reason?.let { " · $it" } ?: ""))
             Log.w(TAG, message)
             mutableState.update { it.copy(phase = CapturePhase.FAILED, error = message) }
             finish()

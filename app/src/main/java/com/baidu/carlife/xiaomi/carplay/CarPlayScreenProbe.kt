@@ -45,6 +45,7 @@ internal object CarPlayScreenProbe {
         val display = CarPlayDisplay.fromReceiverInfo(receiverInfo)
         val resolution = display.resolution
         onResolution(resolution)
+        ProjectionLog.event("车机主屏参数 · ${resolution.width}×${resolution.height}/${resolution.frameRate} fps")
 
         onStage("正在建立 CarPlay 会话")
         val session = NSDictionary().apply {
@@ -101,6 +102,7 @@ internal object CarPlayScreenProbe {
                         } catch (failure: java.io.IOException) {
                             if (!video.isClosed) {
                                 android.util.Log.i("CarNatIap2", "CarPlay 控制通道失联：${failure.message}")
+                                ProjectionLog.failure("CarPlay 控制通道心跳失败", failure)
                                 sockets.close()
                             }
                         }
@@ -121,8 +123,11 @@ internal object CarPlayScreenProbe {
         sockets: CarPlaySockets, preferences: ProjectionPreferences,
         onAudio: (Boolean, CarPlayAudioInfo) -> Unit, navigation: Boolean,
     ): CarPlayMediaAudio? {
-        val formats = info.objectForKey("audioFormats") as? NSArray ?: return null
         val audioType = if (navigation) "alert" else "media"
+        val formats = info.objectForKey("audioFormats") as? NSArray ?: run {
+            ProjectionLog.event("车机未提供音频格式 · stream=$audioType")
+            return null
+        }
         val media = formats.array.filterIsInstance<NSDictionary>().filter {
             (it.objectForKey("audioType") as? NSString)?.content == audioType
         }
@@ -141,15 +146,20 @@ internal object CarPlayScreenProbe {
             pcmMask and 0x8000 != 0 -> 0x8000 to 48_000
             else -> null
         }
-        val (format, rate) = if (navigation) when {
+        val selected = if (navigation) when {
             pcmMask and 0x4000 != 0 -> 0x4000 to 48_000
             pcmMask and 0x400 != 0 -> 0x400 to 44_100
             pcmMask and 0x10 != 0 -> 0x10 to 16_000
-            else -> return null
+            else -> null
         } else {
-            (if (preferences.audioPreference == AudioPreference.PCM) mediaPcm ?: mediaAac
-            else mediaAac ?: mediaPcm) ?: return null
+            if (preferences.audioPreference == AudioPreference.PCM) mediaPcm ?: mediaAac
+            else mediaAac ?: mediaPcm
         }
+        if (selected == null) {
+            ProjectionLog.event("无可用音频格式 · stream=$audioType AAC=0x${aacMask.toString(16)} PCM=0x${pcmMask.toString(16)}")
+            return null
+        }
+        val (format, rate) = selected
         val aac = format >= 0x400000
         val bufferMs = if (navigation) preferences.navigationBufferMs ?: 100
             else preferences.mediaBufferMs ?: if (aac) 350 else 120
@@ -169,6 +179,7 @@ internal object CarPlayScreenProbe {
         val reply = try {
             parse(request(control, "SETUP", "/", body))
         } catch (failure: ProtocolException) {
+            ProjectionLog.failure("音频 SETUP 失败 · stream=$audioType format=$format", failure)
             if (!navigation) throw failure
             android.util.Log.w("CarNatAudio", "Receiver did not negotiate navigation audio", failure)
             return null
@@ -177,7 +188,10 @@ internal object CarPlayScreenProbe {
         val response = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
             (it.objectForKey("type") as? NSNumber)?.intValue() == type &&
                 (it.objectForKey("streamConnectionID") as? NSNumber)?.longValue()?.let { it == id } != false
-        } ?: return null
+        } ?: run {
+            ProjectionLog.event("车机 SETUP 未返回匹配音频流 · stream=$audioType format=$format")
+            return null
+        }
         val dataPort = port(response, "dataPort")
         return CarPlayMediaAudio(
             sockets.openDatagram(), host, dataPort, keys.video(id), rate, aac,
@@ -205,6 +219,7 @@ internal object CarPlayScreenProbe {
             var longestWriteMs = 0L
             var nextKeepAlive = SystemClock.elapsedRealtime() + 1_000
             var nextReport = SystemClock.elapsedRealtime() + 5_000
+            var nextPersistentReport = SystemClock.elapsedRealtime() + 30_000
             var firstPtsUs = 0L
             var firstNtp = 0L
             while (!video.isClosed && CarlifeConnectService.state.value.active) {
@@ -220,6 +235,10 @@ internal object CarPlayScreenProbe {
                 if (now >= nextReport) {
                     val (encoded, dropped) = feed.counts()
                     android.util.Log.i("CarNatVideo", "encoded=$encoded sent=$frames dropped=$dropped payloadBytes=$sentBytes maxWriteMs=$longestWriteMs")
+                    if (now >= nextPersistentReport) {
+                        ProjectionLog.event("视频统计 · encoded=$encoded sent=$frames dropped=$dropped bytes=$sentBytes maxWriteMs=$longestWriteMs")
+                        nextPersistentReport = now + 30_000
+                    }
                     nextReport = now + 5_000
                 }
                 val frame = feed.poll(200) ?: continue

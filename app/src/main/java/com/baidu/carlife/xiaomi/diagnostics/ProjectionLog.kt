@@ -10,6 +10,12 @@ import android.os.Environment
 import android.os.Process
 import android.provider.MediaStore
 import android.util.Log
+import androidx.core.content.pm.PackageInfoCompat
+import java.io.EOFException
+import java.net.ConnectException
+import java.net.ProtocolException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import androidx.annotation.RequiresApi
 import java.io.File
 import java.io.IOException
@@ -25,8 +31,14 @@ internal object ProjectionLog {
     private val exportLock = Any()
     private val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.ROOT)
     private val rtspCode = Regex("RTSP[^0-9]{0,12}([1-5][0-9]{2})")
+    private val protocolOrigins = setOf(
+        "Iap2LinkProbe", "MfiSap", "MfiTrust", "CarPlayPairing", "PairingTlv",
+        "CarPlayReceiverProbe", "CarPlayScreenProbe", "CarPlayDisplay", "CarPlayTouchEvents",
+        "ReceiverWifi", "ReceiverWifiRequest", "RtspControl", "BluetoothReceiverProbe",
+    )
     private lateinit var files: RollingLogFiles
 
+    @Suppress("DEPRECATION")
     fun initialize(context: Context) {
         files = RollingLogFiles(File(context.noBackupFilesDir, "projection-logs"))
         val prefs = context.getSharedPreferences("log_process", Context.MODE_PRIVATE)
@@ -44,6 +56,11 @@ internal object ProjectionLog {
             }
         }
         CoroutineScope(Dispatchers.IO).launch {
+            val version = runCatching {
+                val info = context.packageManager.getPackageInfo(context.packageName, 0)
+                "${info.versionName} (${PackageInfoCompat.getLongVersionCode(info)})"
+            }.getOrDefault("未知")
+            event("进程启动 · pid=${Process.myPid()} · CarNat $version · Android ${Build.VERSION.RELEASE} / API ${Build.VERSION.SDK_INT}")
             if (Build.VERSION.SDK_INT >= 30 && previousPid != 0) {
                 runCatching { collectExit(context, previousPid, previousStart, expectedRestartAt) }
                     .onFailure { Log.w(TAG, "Could not collect process exit", it) }
@@ -69,16 +86,41 @@ internal object ProjectionLog {
     }
 
     fun failure(stage: String, error: Throwable) {
-        val status = rtspCode.find(error.message.orEmpty())?.groupValues?.get(1)
         event(buildString {
-            append(stage).append(" · ").append(error.javaClass.simpleName)
-            if (status != null) append(" · RTSP ").append(status)
-            error.stackTrace.take(10).forEach { append("\n  at ").append(it) }
-            error.cause?.takeUnless { it === error }?.let {
-                append("\n  caused by ").append(it.javaClass.simpleName)
-                it.stackTrace.take(5).forEach { frame -> append("\n  at ").append(frame) }
+            append(stage)
+            var current: Throwable? = error
+            repeat(4) { depth ->
+                val cause = current ?: return@repeat
+                append(if (depth == 0) " · " else "\n  caused by ")
+                append(cause.javaClass.simpleName)
+                failureReason(cause)?.let { append(" · ").append(it) }
+                cause.stackTrace.take(if (depth == 0) 8 else 3).forEach { append("\n  at ").append(it) }
+                current = cause.cause?.takeUnless { it === cause }
             }
         })
+    }
+
+    private fun failureReason(error: Throwable): String? {
+        val message = error.message.orEmpty()
+        val origin = error.stackTrace.firstOrNull()?.className.orEmpty()
+        val prefix = "com.baidu.carlife.xiaomi.carplay."
+        // These local protocol errors are built from fixed text, protocol field names and numeric codes.
+        if (origin.startsWith(prefix) && origin.removePrefix(prefix).substringBefore('$') in protocolOrigins &&
+            (error is ProtocolException || error is EOFException || error.javaClass == IOException::class.java)
+        ) return message.take(250)
+        return when (error) {
+            is SocketTimeoutException -> "套接字等待超时"
+            is ConnectException -> "无法建立 TCP 连接"
+            is UnknownHostException -> "无法解析接收端地址"
+            is EOFException -> "对端在消息收完前关闭了连接"
+            is SecurityException -> "系统或远程服务拒绝访问"
+            else -> when (message) {
+                "Try again" -> "系统返回 EAGAIN，操作未在等待窗口内完成"
+                "Connection reset", "Connection reset by peer" -> "对端重置 TCP 连接"
+                "Broken pipe" -> "发送时对端已关闭连接"
+                else -> rtspCode.find(message)?.groupValues?.get(1)?.let { "RTSP $it" }
+            }
+        }
     }
 
     @Synchronized

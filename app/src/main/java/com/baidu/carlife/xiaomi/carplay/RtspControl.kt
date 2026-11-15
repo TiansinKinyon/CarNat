@@ -1,5 +1,6 @@
 package com.baidu.carlife.xiaomi.carplay
 
+import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import java.io.BufferedInputStream
 import java.io.Closeable
 import java.io.EOFException
@@ -61,12 +62,24 @@ internal class RtspControl(
         }.toByteArray(Charsets.US_ASCII)
         require(requestHead.size <= MAX_HEAD_BYTES)
 
+        val started = System.nanoTime()
+        val safeTarget = when (target) {
+            "*", "/", "/setup", "/info", "/pair-setup", "/pair-verify", "/auth-setup", "/command", "/feedback" -> target
+            else -> "<动态路径>"
+        }
+        val requestName = "RTSP $method $safeTarget · CSeq=$sequence · 加密=$encrypted"
         try {
             output.write(requestHead)
             output.write(body)
             output.flush()
-            return readResponse(sequence)
+            val response = readResponse(sequence)
+            val elapsed = (System.nanoTime() - started) / 1_000_000
+            if (method != "OPTIONS" || response.status !in 200..299 || elapsed >= 1_000) {
+                ProjectionLog.event("$requestName · 状态=${response.status} · 用时=${elapsed}ms · 响应=${response.body.size}B")
+            }
+            return response
         } catch (error: IOException) {
+            ProjectionLog.failure("$requestName · 用时=${(System.nanoTime() - started) / 1_000_000}ms", error)
             try {
                 close()
             } catch (closeError: IOException) {

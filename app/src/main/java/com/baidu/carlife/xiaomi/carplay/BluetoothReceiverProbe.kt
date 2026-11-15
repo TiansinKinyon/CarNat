@@ -9,6 +9,7 @@ import android.net.ConnectivityManager
 import android.os.Build
 import android.os.SystemClock
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import java.io.Closeable
 import java.io.IOException
 import java.util.UUID
@@ -60,8 +61,13 @@ internal class BluetoothReceiverProbe(
     ) {
         try {
             var reconnectUntil = 0L
+            var attemptNumber = 0
             while (!closed) {
                 var streamed = false
+                val started = SystemClock.elapsedRealtime()
+                attemptNumber++
+                val mode = if (readResolutionOnly) "预连接" else "正式连接"
+                ProjectionLog.event("CarPlay $mode · 尝试 $attemptNumber")
                 try {
                     val acceptTimeout = if (reconnectUntil == 0L) 30_000 else
                         (reconnectUntil - SystemClock.elapsedRealtime()).coerceIn(1L, 30_000L).toInt()
@@ -71,10 +77,12 @@ internal class BluetoothReceiverProbe(
                     }, onResolution, onDiagnostics, readResolutionOnly, preferences, onStage)
                 } catch (error: IOException) {
                     if (closed) return
+                    ProjectionLog.failure("CarPlay $mode · 尝试 $attemptNumber · 首帧=$streamed", error)
                     if (!captureReady() || (!streamed && SystemClock.elapsedRealtime() >= reconnectUntil)) throw error
                     onStage("投屏连接已断开 · 等待接收端重新连接")
                 } finally {
                     closeAttempt()
+                    ProjectionLog.event("CarPlay $mode · 尝试 $attemptNumber 结束 · 用时=${SystemClock.elapsedRealtime() - started}ms · 首帧=$streamed · 主动关闭=$closed")
                     onDiagnostics(ReceiverDiagnostics())
                 }
                 if (readResolutionOnly || !captureReady()) break
@@ -109,7 +117,10 @@ internal class BluetoothReceiverProbe(
             adapter.listenUsingRfcommWithServiceRecord("CarPlay", SERVICE_UUID).also { server = it }
         }
         onStage("正在等待配对设备 $receiverName 连接")
+        ProjectionLog.event("蓝牙 RFCOMM · 监听窗口=${acceptTimeout}ms")
+        val listeningSince = SystemClock.elapsedRealtime()
         val connection = listener.accept(acceptTimeout)
+        ProjectionLog.event("蓝牙 RFCOMM · 已接受连接 · 用时=${SystemClock.elapsedRealtime() - listeningSince}ms")
         synchronized(this) {
             if (closed) {
                 connection.close()
@@ -122,7 +133,9 @@ internal class BluetoothReceiverProbe(
         val device = connection.remoteDevice
         val matches = if (receiverAddress.isEmpty()) device.name.equals(receiverName, ignoreCase = true)
         else device.address.equals(receiverAddress, ignoreCase = true)
-        if (device.bondState != BluetoothDevice.BOND_BONDED || !matches) {
+        val bondState = device.bondState
+        if (bondState != BluetoothDevice.BOND_BONDED || !matches) {
+            ProjectionLog.event("蓝牙 RFCOMM · 忽略连接 · bondState=$bondState · 匹配所选设备=$matches")
             throw IOException("忽略了来自其他蓝牙设备的连接")
         }
         onStage("蓝牙 RFCOMM 已连接")
@@ -151,6 +164,9 @@ internal class BluetoothReceiverProbe(
             requestWifi(wifi)
         }, onStage)
         endpoint.wifi?.let(::publishWifi)
+        val addressKind = if (':' in endpoint.host) "IPv6"
+            else if (endpoint.host.all { it.isDigit() || it == '.' }) "IPv4" else "主机名"
+        ProjectionLog.event("iAP2 · 网络端点类型=$addressKind · 提供热点配置=${endpoint.wifi != null}")
         diagnostics = diagnostics.copy(host = endpoint.host, port = endpoint.port)
         onDiagnostics(diagnostics)
         if (pin.isNotEmpty()) {
@@ -164,6 +180,7 @@ internal class BluetoothReceiverProbe(
                     phoneIps = link?.linkAddresses?.mapNotNull { it.address.hostAddress }.orEmpty(),
                 )
                 onDiagnostics(diagnostics)
+                ProjectionLog.event("Wi-Fi · 已绑定车机网络 · 可用本机 IP 数=${diagnostics.phoneIps.size}")
                 onStage("已连接车机 Wi-Fi")
             }
             onStage(CarPlayReceiverProbe.verify(

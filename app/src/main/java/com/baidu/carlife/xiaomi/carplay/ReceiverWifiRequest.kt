@@ -9,6 +9,8 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
+import android.os.SystemClock
+import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import androidx.annotation.RequiresApi
 import java.io.Closeable
 import java.io.IOException
@@ -30,19 +32,25 @@ internal class ReceiverWifiRequest(
     @Volatile private var network: Network? = null
     @Volatile private var closed = false
     private var registered = false
+    @Volatile private var requestStarted = 0L
+
+    private fun elapsedMs() = SystemClock.elapsedRealtime() - requestStarted
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             this@ReceiverWifiRequest.network = network
+            ProjectionLog.event("Wi-Fi · Android onAvailable · 用时=${elapsedMs()}ms")
             ready.countDown()
         }
 
         override fun onUnavailable() {
+            ProjectionLog.event("Wi-Fi · Android onUnavailable · 用时=${elapsedMs()}ms · 系统未提供拒绝或关联失败的具体原因")
             ready.countDown()
         }
 
         override fun onLost(network: Network) {
             this@ReceiverWifiRequest.network = null
+            ProjectionLog.event("Wi-Fi · Android onLost · 用时=${elapsedMs()}ms")
             ready.countDown()
             onLost.invoke()
         }
@@ -69,6 +77,8 @@ internal class ReceiverWifiRequest(
             .setNetworkSpecifier(specifier)
             .build()
         try {
+            requestStarted = SystemClock.elapsedRealtime()
+            ProjectionLog.event("Wi-Fi · 请求车机热点 · 加密类型=${wifi.security} · 信道=${wifi.channel ?: "未知"} · 超时=45000ms")
             connectivity.requestNetwork(request, callback, 45_000)
             registered = true
         } catch (_: SecurityException) {
@@ -77,7 +87,9 @@ internal class ReceiverWifiRequest(
     }
 
     fun awaitNetwork(): Network {
-        ready.await(46, TimeUnit.SECONDS)
+        if (!ready.await(46, TimeUnit.SECONDS)) {
+            ProjectionLog.event("Wi-Fi · 46000ms 内未收到 Android 网络回调")
+        }
         if (closed) throw IOException("车机 Wi-Fi 连接已停止")
         return network ?: throw IOException("未能连接车机 Wi-Fi，请确认 Wi-Fi 已打开并接受系统连接请求")
     }
