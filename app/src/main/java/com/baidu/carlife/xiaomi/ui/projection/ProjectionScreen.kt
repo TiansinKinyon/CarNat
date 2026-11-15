@@ -48,6 +48,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.disabled
@@ -59,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CaptureStatus
 import com.baidu.carlife.service.CarlifeConnectService
+import com.baidu.carlife.service.ReceiverConnection
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
@@ -173,7 +176,28 @@ private fun ProjectionContent(
 ) {
     val colors = MaterialTheme.colorScheme
     val connectionError = error ?: status.error
-    val showError = supported && connectionError != null
+    val showError = supported && (
+        connectionError != null || status.phase == CapturePhase.FAILED ||
+            status.receiverConnection == ReceiverConnection.FAILED
+        )
+    val showSuccess = supported && !showError && status.active &&
+        status.receiverConnection == ReceiverConnection.CONNECTED
+    val carWithLink = when {
+        supported && status.phase == CapturePhase.RECEIVING -> ProjectionLinkStatus.CONNECTED
+        showError -> ProjectionLinkStatus.FAILED
+        !supported -> ProjectionLinkStatus.PENDING
+        else -> when (status.phase) {
+            CapturePhase.ARMED, CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES ->
+                ProjectionLinkStatus.CONNECTING
+            else -> ProjectionLinkStatus.PENDING
+        }
+    }
+    val receiverLink = when {
+        showError -> ProjectionLinkStatus.FAILED
+        showSuccess -> ProjectionLinkStatus.CONNECTED
+        supported && status.active -> ProjectionLinkStatus.CONNECTING
+        else -> ProjectionLinkStatus.PENDING
+    }
     val message = if (!supported) {
         "CarPlay 投屏需要 Android 13 或更新版本"
     } else {
@@ -211,30 +235,18 @@ private fun ProjectionContent(
                     ProjectionNode("CarWith", R.drawable.ic_mobile_cast, Modifier.weight(1.5f))
                     ProjectionLink(
                         label = "CarWith 到 CarNat",
-                        active = supported && status.active,
-                        status = ProjectionLinkStatus.PENDING,
+                        status = carWithLink,
                         modifier = Modifier.weight(1f),
                     )
                     ProjectionNode("CarNat", R.drawable.ic_extension, Modifier.weight(1.5f))
                     ProjectionLink(
-                        label = "CarNat 到 Carplay",
-                        active = supported && status.active,
-                        status = ProjectionLinkStatus.PENDING,
+                        label = "CarNat 到 CarPlay",
+                        status = receiverLink,
                         modifier = Modifier.weight(1f),
                     )
-                    ProjectionNode("Carplay", R.drawable.ic_car_gear, Modifier.weight(1.5f))
+                    ProjectionNode("CarPlay", R.drawable.ic_car_gear, Modifier.weight(1.5f))
                 }
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = if (showError) colors.errorContainer else colors.surfaceContainer,
-                    contentColor = if (showError) colors.onErrorContainer else colors.onSurface,
-                ) {
-                    Text(
-                        message,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
+                ProjectionStatusMessage(message, receiverLink)
             }
             if (supported) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -282,8 +294,36 @@ private fun ProjectionNode(label: String, @DrawableRes icon: Int, modifier: Modi
     }
 }
 
+@Composable
+private fun ProjectionStatusMessage(message: String, status: ProjectionLinkStatus) {
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.surface.luminance() < 0.5f
+    val (container, content) = when (status) {
+        ProjectionLinkStatus.CONNECTED -> if (dark) {
+            Color(0xFF214E34) to Color(0xFFC2F2CE)
+        } else {
+            Color(0xFFCDEFD5) to Color(0xFF143923)
+        }
+        ProjectionLinkStatus.FAILED -> colors.errorContainer to colors.onErrorContainer
+        else -> colors.surfaceContainer to colors.onSurface
+    }
+
+    Surface(Modifier.fillMaxWidth(), color = container, contentColor = content) {
+        Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val icon = if (status == ProjectionLinkStatus.CONNECTED) R.drawable.ic_link else R.drawable.ic_link_off
+            Icon(painterResource(icon), contentDescription = null, modifier = Modifier.size(20.dp))
+            Text(message, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
 private enum class ProjectionLinkStatus(@get:DrawableRes val icon: Int, val description: String) {
     PENDING(R.drawable.ic_more_horiz, "未连接"),
+    CONNECTING(R.drawable.ic_more_horiz, "正在连接"),
     CONNECTED(R.drawable.ic_check_circle, "已连接"),
     FAILED(R.drawable.ic_error, "连接失败"),
 }
@@ -291,7 +331,6 @@ private enum class ProjectionLinkStatus(@get:DrawableRes val icon: Int, val desc
 @Composable
 private fun ProjectionLink(
     label: String,
-    active: Boolean,
     status: ProjectionLinkStatus,
     modifier: Modifier,
 ) {
@@ -304,10 +343,12 @@ private fun ProjectionLink(
     ) {
         Box(Modifier.fillMaxWidth().height(32.dp), contentAlignment = Alignment.Center) {
             val indicator = Modifier.fillMaxWidth().height(4.dp)
-            if (active) {
-                LinearProgressIndicator(indicator, color = color, trackColor = track)
-            } else {
-                Box(indicator.background(track, RoundedCornerShape(50)))
+            when (status) {
+                ProjectionLinkStatus.CONNECTING ->
+                    LinearProgressIndicator(modifier = indicator, color = color, trackColor = track)
+                ProjectionLinkStatus.CONNECTED ->
+                    LinearProgressIndicator(progress = { 1f }, modifier = indicator, color = color, trackColor = track)
+                else -> Box(indicator.background(track, RoundedCornerShape(50)))
             }
         }
         Icon(
@@ -334,7 +375,27 @@ private fun ProjectionReadyPreview() {
 @Composable
 private fun ProjectionActivePreview() {
     CarNatTheme {
-        ProjectionPreviewContent(CaptureStatus(phase = CapturePhase.RECEIVING, receiverStatus = "正在投屏"))
+        ProjectionPreviewContent(
+            CaptureStatus(
+                phase = CapturePhase.RECEIVING,
+                receiverStatus = "正在投屏",
+                receiverConnection = ReceiverConnection.CONNECTED,
+            ),
+        )
+    }
+}
+
+@Preview(name = "正在连接", showBackground = true, widthDp = 360)
+@Composable
+private fun ProjectionConnectingPreview() {
+    CarNatTheme { ProjectionPreviewContent(CaptureStatus(phase = CapturePhase.WAITING_FOR_FRAMES)) }
+}
+
+@Preview(name = "连接失败", showBackground = true, widthDp = 360)
+@Composable
+private fun ProjectionFailedPreview() {
+    CarNatTheme {
+        ProjectionPreviewContent(CaptureStatus(phase = CapturePhase.FAILED, error = "等待 CarPlay 接收端超时"))
     }
 }
 

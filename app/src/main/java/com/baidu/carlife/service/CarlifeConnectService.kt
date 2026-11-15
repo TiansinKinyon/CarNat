@@ -89,6 +89,7 @@ class CarlifeConnectService : Service() {
         }
         receiverJob = projectionScope.launch {
             var streamed = false
+            var terminalError: String? = null
             var probedResolution: CarPlayResolution? = null
             try {
                 withContext(Dispatchers.IO) {
@@ -100,6 +101,7 @@ class CarlifeConnectService : Service() {
                             projectionScope.launch {
                                 if (receiverProbe === probe) {
                                     dismissConnectingNotification()
+                                    mutableState.update { it.copy(receiverConnection = ReceiverConnection.CONNECTED) }
                                     startForeground(
                                         NOTIFICATION_ID,
                                         projectionNotification("CarNat 连接成功", "正在投屏到车机"),
@@ -110,6 +112,7 @@ class CarlifeConnectService : Service() {
                         onReconnecting = {
                             projectionScope.launch {
                                 if (receiverProbe === probe) {
+                                    mutableState.update { it.copy(receiverConnection = ReceiverConnection.PENDING) }
                                     startForeground(
                                         NOTIFICATION_ID,
                                         projectionNotification("CarNat 正在重连", "正在等待车机重新连接"),
@@ -155,7 +158,7 @@ class CarlifeConnectService : Service() {
                     if (!streamed) {
                         worker.post { capture.fail(message) }
                     } else {
-                        mutableState.update { it.copy(receiverStatus = message) }
+                        terminalError = message
                     }
                 }
             } finally {
@@ -164,6 +167,12 @@ class CarlifeConnectService : Service() {
                     receiverProbe = null
                     dismissConnectingNotification()
                     if (streamed) {
+                        mutableState.update {
+                            it.copy(
+                                receiverConnection = ReceiverConnection.FAILED,
+                                receiverStatus = terminalError ?: "投屏连接已断开",
+                            )
+                        }
                         startForeground(
                             NOTIFICATION_ID,
                             projectionNotification("CarNat 连接已断开", "点按返回 CarNat"),
@@ -177,6 +186,7 @@ class CarlifeConnectService : Service() {
     }
 
     private fun stopReceiver() {
+        mutableState.update { it.copy(receiverConnection = ReceiverConnection.PENDING) }
         dismissConnectingNotification()
         receiverProbe?.close()
         receiverProbe = null
@@ -883,6 +893,10 @@ enum class CapturePhase(val isActive: Boolean = false) {
     BINDING(true), WAITING_FOR_FRAMES(true), RECEIVING(true), STOPPED, FAILED
 }
 
+enum class ReceiverConnection {
+    PENDING, CONNECTED, FAILED
+}
+
 data class CaptureStatus(
     val phase: CapturePhase = CapturePhase.IDLE,
     val connectionType: Int? = null,
@@ -893,6 +907,7 @@ data class CaptureStatus(
     val avcKeyFrameBytes: Int? = null,
     val error: String? = null,
     val receiverStatus: String? = null,
+    val receiverConnection: ReceiverConnection = ReceiverConnection.PENDING,
     val receiverDisplayChanged: Boolean = false,
     val outputWidth: Int? = null,
     val outputHeight: Int? = null,
