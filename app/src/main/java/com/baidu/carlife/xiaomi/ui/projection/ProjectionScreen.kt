@@ -91,7 +91,13 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         error = if (receiver == null) "请开启蓝牙并选择已配对的接收端"
         else startProjection(context, settings.copy(name = receiver.name))
     }
-    val projectionPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+    val notificationPermissions = remember(context) {
+        context.getSharedPreferences("projection_notifications", Context.MODE_PRIVATE)
+    }
+    val projectionPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (Manifest.permission.POST_NOTIFICATIONS in grants) {
+            notificationPermissions.edit().putBoolean("requested", true).apply()
+        }
         if (missingReceiverPermissions(context).isEmpty()) beginProjection()
         else error = "请允许附近设备和局域网访问权限，以连接车机"
     }
@@ -138,9 +144,15 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
             if (status.active) {
                 CarlifeConnectService.stopDiagnostic(context)
             } else {
-                val missing = missingReceiverPermissions(context)
+                val missing = missingReceiverPermissions(context).toMutableList()
+                if (Build.VERSION.SDK_INT >= 33 &&
+                    context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+                    !notificationPermissions.getBoolean("requested", false)
+                ) {
+                    missing.add(Manifest.permission.POST_NOTIFICATIONS)
+                }
                 if (missing.isEmpty()) beginProjection()
-                else projectionPermissions.launch(missing)
+                else projectionPermissions.launch(missing.toTypedArray())
             }
         },
     )

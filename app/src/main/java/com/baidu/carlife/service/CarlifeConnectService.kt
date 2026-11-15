@@ -1,5 +1,6 @@
 package com.baidu.carlife.service
 
+import android.Manifest
 import android.app.Service
 import android.bluetooth.BluetoothManager
 import android.app.Notification
@@ -10,6 +11,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -28,6 +30,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
+import androidx.core.app.NotificationCompat
 import com.baidu.carlife.mixing.CastConfig
 import com.baidu.carlife.mixing.MusicInfo
 import com.baidu.carlife.mixing.aidl.ICarLifeCastCallback
@@ -37,6 +40,7 @@ import com.baidu.carlife.mixing.aidl.IRemoteKeyListener
 import com.baidu.carlife.mixing.aidl.IRemoteTouchListener
 import com.baidu.carlife.mixing.aidl.ISystemAudioCallback
 import com.baidu.carlife.xiaomi.MainActivity
+import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
@@ -79,7 +83,7 @@ class CarlifeConnectService : Service() {
         val probe = BluetoothReceiverProbe(getSystemService(ConnectivityManager::class.java))
         receiverProbe = probe
         val timeout = projectionScope.launch {
-            delay(100_000)
+            delay(RECEIVER_CONNECT_TIMEOUT_MS)
             stopReceiver()
             worker.post { capture.fail("等待 CarPlay 接收端超时") }
         }
@@ -93,6 +97,9 @@ class CarlifeConnectService : Service() {
                         onStreamStarted = {
                             streamed = true
                             timeout.cancel()
+                            projectionScope.launch {
+                                if (receiverProbe === probe) dismissConnectingNotification()
+                            }
                         },
                         receiverAddress = settings.receiverAddress,
                         readResolutionOnly = readResolutionOnly,
@@ -139,6 +146,7 @@ class CarlifeConnectService : Service() {
                 timeout.cancel()
                 if (receiverProbe === probe) {
                     receiverProbe = null
+                    dismissConnectingNotification()
                     mutableReceiverDiagnostics.value = ReceiverDiagnostics()
                     probedResolution?.let(::prepareCarWithLaunch)
                 }
@@ -147,6 +155,7 @@ class CarlifeConnectService : Service() {
     }
 
     private fun stopReceiver() {
+        dismissConnectingNotification()
         receiverProbe?.close()
         receiverProbe = null
         launchResolution = null
@@ -231,6 +240,7 @@ class CarlifeConnectService : Service() {
             startForeground(NOTIFICATION_ID, diagnosticNotification())
             val connectionType = intent.getIntExtra("usb_type", -1)
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
+            showConnectingNotification()
             beginCapture(connectionType, resolution)
         } else if (!mutableState.value.active) {
             // Even a declined external start must satisfy startForegroundService's contract.
@@ -284,11 +294,46 @@ class CarlifeConnectService : Service() {
         super.onDestroy()
     }
 
+    private fun showConnectingNotification() {
+        val notifications = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            notifications.createNotificationChannel(
+                NotificationChannel(CONNECTING_CHANNEL_ID, "连接提醒", NotificationManager.IMPORTANCE_HIGH),
+            )
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return
+        if (!notifications.areNotificationsEnabled()) return
+
+        val notification = NotificationCompat.Builder(this, CONNECTING_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_cast)
+            .setContentTitle("CarNat 正在连接")
+            .setContentText("正在连接车机并准备 CarWith 投屏画面")
+            .setContentIntent(openCarNatIntent())
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_SOUND)
+            .setOnlyAlertOnce(true)
+            .setTimeoutAfter(RECEIVER_CONNECT_TIMEOUT_MS)
+            .build()
+        try {
+            notifications.notify(CONNECTING_NOTIFICATION_ID, notification)
+        } catch (_: SecurityException) {
+            // Notification access can be revoked between the permission check and posting.
+        }
+    }
+
+    private fun dismissConnectingNotification() {
+        getSystemService(NotificationManager::class.java).cancel(CONNECTING_NOTIFICATION_ID)
+    }
+
+    private fun openCarNatIntent(): PendingIntent = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+    )
+
     @Suppress("DEPRECATION")
     private fun diagnosticNotification(): Notification {
-        val openApp = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
-        )
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "CarWith 投屏诊断", NotificationManager.IMPORTANCE_LOW),
@@ -300,7 +345,7 @@ class CarlifeConnectService : Service() {
         return builder.setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentTitle("CarNat")
             .setContentText("CarWith 投屏诊断正在运行")
-            .setContentIntent(openApp)
+            .setContentIntent(openCarNatIntent())
             .setOngoing(true)
             .build()
     }
@@ -712,6 +757,9 @@ class CarlifeConnectService : Service() {
         private const val TAG = "CarNatCapture"
         private const val CHANNEL_ID = "carwith_diagnostics"
         private const val NOTIFICATION_ID = 1
+        private const val CONNECTING_CHANNEL_ID = "carplay_connecting"
+        private const val CONNECTING_NOTIFICATION_ID = 2
+        private const val RECEIVER_CONNECT_TIMEOUT_MS = 100_000L
         private const val CAR_WITH_START_TIMEOUT_MS = 90_000L
         // CarWith force-stops the CarLife component before starting its service.
         private const val LAUNCH_TICKET = "pending_carwith_launch"
