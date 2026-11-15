@@ -2,8 +2,6 @@ package com.baidu.carlife.xiaomi.ui
 
 import android.content.res.Configuration
 import androidx.annotation.DrawableRes
-import androidx.compose.animation.AnimatedVisibilityScope
-import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.LinearEasing
@@ -12,6 +10,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
@@ -45,12 +46,16 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigationevent.NavigationEventTransitionState
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.ui.help.HelpScreen
 import com.baidu.carlife.xiaomi.ui.monitoring.MonitoringScreen
@@ -81,6 +86,19 @@ internal fun CarNatApp() {
 @Composable
 private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
     val navController = rememberNavController()
+    val currentEntry by navController.currentBackStackEntryAsState()
+    val hostLifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    val navigationEventDispatcher = checkNotNull(LocalNavigationEventDispatcherOwner.current)
+        .navigationEventDispatcher
+    val navigationTransition by navigationEventDispatcher.transitionState.collectAsState()
+
+    fun isPageActive(entry: NavBackStackEntry): Boolean {
+        // Cancelling a seek can leave the entry in STARTED even though it is still on top.
+        return entry.id == currentEntry?.id &&
+            hostLifecycle == Lifecycle.State.RESUMED &&
+            navigationTransition == NavigationEventTransitionState.Idle
+    }
+
     NavHost(
         navController = navController,
         startDestination = Destination.CONNECT.route,
@@ -104,7 +122,7 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
         Destination.entries.forEach { destination ->
             composable(destination.route) { entry ->
                 NavigationPage(
-                    entry = entry,
+                    active = isPageActive(entry),
                     title = destination.label,
                     selectedDestination = destination,
                     onNavigate = { item ->
@@ -132,7 +150,7 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
             composable(setting.route) { entry ->
                 DeveloperSettingsScreen { actions, body ->
                     NavigationPage(
-                        entry = entry,
+                        active = isPageActive(entry),
                         title = setting.title,
                         onBack = { navController.popBackStack() },
                         topBarActions = actions,
@@ -149,8 +167,8 @@ private val NavBackStackEntry.isSettingDetail: Boolean
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AnimatedVisibilityScope.NavigationPage(
-    entry: NavBackStackEntry,
+private fun NavigationPage(
+    active: Boolean,
     title: String,
     selectedDestination: Destination? = null,
     onNavigate: (Destination) -> Unit = {},
@@ -158,11 +176,6 @@ private fun AnimatedVisibilityScope.NavigationPage(
     topBarActions: @Composable (Boolean) -> Unit = {},
     content: @Composable (Boolean) -> Unit = {},
 ) {
-    val lifecycleState by entry.lifecycle.currentStateAsState()
-    val active = lifecycleState == Lifecycle.State.RESUMED &&
-        transition.currentState == EnterExitState.Visible &&
-        transition.targetState == EnterExitState.Visible &&
-        !transition.isRunning
     val latestActive = rememberUpdatedState(active)
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
@@ -233,14 +246,16 @@ private fun AnimatedVisibilityScope.NavigationPage(
 private fun Modifier.gatePageInput(isActive: () -> Boolean): Modifier = this
     .onPreviewKeyEvent { !isActive() }
     .pointerInput(Unit) {
-        awaitPointerEventScope {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
             var blockedGesture = false
+            var event = currentEvent
             while (true) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
                 // A gesture blocked during a transition stays blocked through the last pointer up.
                 if (!isActive()) blockedGesture = true
                 if (blockedGesture) event.changes.forEach { it.consume() }
-                if (event.changes.none { it.pressed }) blockedGesture = false
+                if (event.changes.none { it.pressed }) break
+                event = awaitPointerEvent(PointerEventPass.Initial)
             }
         }
     }
