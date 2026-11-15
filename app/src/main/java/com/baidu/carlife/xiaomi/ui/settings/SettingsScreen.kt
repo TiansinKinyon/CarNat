@@ -38,7 +38,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -56,7 +55,7 @@ internal enum class SettingEntry(val route: String, val title: String) {
 
 private enum class Editor(val title: String) {
     RESOLUTION("输出分辨率"), FPS("本机帧率上限"), BITRATE("视频码率"),
-    AUDIO("音频格式与缓冲"), ADDRESS("本机蓝牙地址"), PIN("网络配对码"),
+    AUDIO("音频格式与缓冲"), PIN("网络配对码"),
 }
 
 @Composable
@@ -103,7 +102,7 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
         if (capture.active) Text("停止投屏后可修改参数", style = MaterialTheme.typography.bodySmall)
         if (error) SaveError()
         SettingsCard {
-            SettingsRow("开发者选项", "蓝牙地址、网络配对码", active) { onOpen(SettingEntry.DEVELOPER) }
+            SettingsRow("开发者选项", "网络配对码", active) { onOpen(SettingEntry.DEVELOPER) }
         }
     }
 
@@ -122,9 +121,9 @@ internal fun DeveloperSettingsScreen(active: Boolean) {
     var error by remember { mutableStateOf(false) }
     val editable = active && !capture.active
 
-    fun save(address: String, pin: String) {
+    fun save(pin: String) {
         if (!editable) return
-        val updated = ReceiverSettings.load(context).copy(address = address, pin = pin)
+        val updated = ReceiverSettings.load(context).copy(pin = pin)
         error = !updated.save(context)
         if (!error) {
             settings = updated
@@ -134,11 +133,9 @@ internal fun DeveloperSettingsScreen(active: Boolean) {
 
     SettingsLayout {
         SettingsCard {
-            SettingsRow(Editor.ADDRESS.title, settings.address.ifBlank { "未设置" }, editable) { editor = Editor.ADDRESS }
-            SettingsDivider()
             SettingsRow(Editor.PIN.title, if (settings.pin.isEmpty()) "默认（3939）" else "已自定义", editable) { editor = Editor.PIN }
         }
-        OutlinedButton(onClick = { save("", "") }, enabled = editable && (settings.address.isNotEmpty() || settings.pin.isNotEmpty())) {
+        OutlinedButton(onClick = { save("") }, enabled = editable && settings.pin.isNotEmpty()) {
             Text("恢复默认")
         }
         if (capture.active) Text("停止投屏后可修改参数", style = MaterialTheme.typography.bodySmall)
@@ -146,31 +143,27 @@ internal fun DeveloperSettingsScreen(active: Boolean) {
     }
     val selected = editor
     if (selected != null && editable) {
-        val address = selected == Editor.ADDRESS
-        var value by remember(selected) { mutableStateOf(if (address) settings.address else settings.pin) }
+        var value by remember(selected) { mutableStateOf(settings.pin) }
         val normalized = value.trim()
-        val valid = if (address) normalized.isEmpty() || ReceiverSettings.validAddress(normalized)
-            else ReceiverSettings.validPin(normalized)
+        val valid = ReceiverSettings.validPin(normalized)
         EditorDialog(
             title = selected.title,
             valid = valid,
             onDismiss = { editor = null },
-            onSave = {
-                if (address) save(normalized, settings.pin) else save(settings.address, normalized)
-            },
-            onReset = { if (address) save("", settings.pin) else save(settings.address, "") },
+            onSave = { save(normalized) },
+            onReset = { save("") },
         ) {
             OutlinedTextField(
                 value = value,
-                onValueChange = { value = it.take(17) },
+                onValueChange = { value = it.take(16) },
                 label = { Text(selected.title) },
-                placeholder = { Text(if (address) "AA:BB:CC:DD:EE:FF" else "3939") },
+                placeholder = { Text("3939") },
                 supportingText = {
-                    Text(if (address) "在手机系统的状态信息中查找蓝牙地址。" else "仅在接收端使用其他网络配对码时填写。")
+                    Text("仅在接收端使用其他网络配对码时填写。")
                 },
                 singleLine = true,
                 isError = !valid,
-                visualTransformation = if (address) VisualTransformation.None else PasswordVisualTransformation(),
+                visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
             )
         }

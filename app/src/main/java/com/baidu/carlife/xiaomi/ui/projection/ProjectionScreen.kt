@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.height
@@ -47,13 +48,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.semantics.disabled
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -65,12 +68,14 @@ import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
+import java.util.Locale
 
 @Composable
 internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val status by CarlifeConnectService.state.collectAsState()
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
+    var phoneAddress by rememberSaveable { mutableStateOf(settings.address.uppercase(Locale.ROOT)) }
     var error by remember { mutableStateOf<String?>(null) }
     var devices by remember { mutableStateOf<List<PairedReceiver>?>(null) }
     var expanded by remember { mutableStateOf(false) }
@@ -92,8 +97,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         val current = ReceiverSettings.load(context)
         error = when {
             receiver == null -> "请开启蓝牙并选择已配对的接收端"
-            !ReceiverSettings.validAddress(current.address) -> "请在设置 → 开发者选项填写本机蓝牙地址"
-            else -> startProjection(context, current.copy(name = receiver.name))
+            !ReceiverSettings.validAddress(phoneAddress) -> "请填写有效的本机蓝牙地址"
+            else -> startProjection(context, current.copy(name = receiver.name, address = phoneAddress))
         }
     }
     val notificationPermissions = remember(context) {
@@ -110,6 +115,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         modifier = modifier,
         status = status,
         settings = settings,
+        phoneAddress = phoneAddress,
+        onAddressChange = { phoneAddress = it.trim().uppercase(Locale.ROOT).take(17) },
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
         receiverPicker = {
@@ -161,6 +168,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
 private fun ProjectionContent(
     status: CaptureStatus,
     settings: ReceiverSettings,
+    phoneAddress: String,
+    onAddressChange: (String) -> Unit,
     error: String?,
     supported: Boolean,
     receiverPicker: @Composable () -> Unit,
@@ -168,6 +177,10 @@ private fun ProjectionContent(
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
+    val validAddress = ReceiverSettings.validAddress(phoneAddress)
+    val addressFocus = remember { FocusRequester() }
+    var addressRequired by rememberSaveable { mutableStateOf(false) }
+    val addressError = !validAddress && (addressRequired || phoneAddress.isNotEmpty())
     val connectionError = error ?: status.error
     val showError = supported && (
         connectionError != null || status.phase == CapturePhase.FAILED ||
@@ -241,17 +254,50 @@ private fun ProjectionContent(
                 }
                 ProjectionStatusMessage(message, receiverLink)
             }
-            if (supported) receiverPicker()
+            if (supported) {
+                receiverPicker()
+                OutlinedTextField(
+                    leadingIcon = { Icon(painterResource(R.drawable.ic_settings_bluetooth), contentDescription = null) },
+                    value = phoneAddress,
+                    onValueChange = {
+                        if (ReceiverSettings.validAddress(it)) addressRequired = false
+                        onAddressChange(it)
+                    },
+                    label = { Text("本机蓝牙地址") },
+                    placeholder = { Text("AA:BB:CC:DD:EE:FF") },
+                    supportingText = {
+                        Text(when {
+                            addressError && phoneAddress.isBlank() -> "请填写本机蓝牙地址"
+                            addressError -> "请输入有效的蓝牙地址"
+                            else -> "可在手机系统的状态信息中查看"
+                        })
+                    },
+                    isError = addressError,
+                    enabled = !status.active,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Characters,
+                        autoCorrectEnabled = false,
+                    ),
+                    modifier = Modifier.fillMaxWidth().focusRequester(addressFocus),
+                )
+            }
         }
         if (supported) {
-            val enabled = status.active || settings.receiverAddress.isNotBlank()
+            val buttonReady = status.active || (settings.receiverAddress.isNotBlank() && validAddress)
             ExtendedFloatingActionButton(
-                onClick = { if (enabled) onProjectionClick() },
-                modifier = Modifier.align(Alignment.BottomEnd)
-                    .padding(end = 24.dp, bottom = 24.dp)
-                    .semantics { if (!enabled) disabled() },
-                containerColor = if (enabled) colors.primaryContainer else colors.surfaceContainerHighest,
-                contentColor = if (enabled) colors.onPrimaryContainer else colors.onSurface.copy(alpha = 0.38f),
+                onClick = {
+                    when {
+                        buttonReady -> onProjectionClick()
+                        !validAddress -> {
+                            addressRequired = true
+                            addressFocus.requestFocus()
+                        }
+                    }
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = 24.dp),
+                containerColor = if (buttonReady) colors.primaryContainer else colors.surfaceContainerHighest,
+                contentColor = if (buttonReady) colors.onPrimaryContainer else colors.onSurface.copy(alpha = 0.38f),
                 icon = { Icon(painterResource(R.drawable.ic_cast), contentDescription = null) },
                 text = { Text(if (status.active) "停止投屏" else "开始投屏") },
             )
@@ -387,7 +433,9 @@ internal fun ProjectionReadyPreviewContent() {
 private fun ProjectionPreviewContent(status: CaptureStatus) {
     ProjectionContent(
         status = status,
-        settings = ReceiverSettings(name = "CarPlay 接收端", address = "02:12:34:56:78:90", receiverAddress = "02:00:00:00:00:01"),
+        settings = ReceiverSettings(name = "CarPlay 接收端", receiverAddress = "02:00:00:00:00:01"),
+        phoneAddress = "02:12:34:56:78:90",
+        onAddressChange = {},
         error = null,
         supported = true,
         receiverPicker = {
