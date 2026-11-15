@@ -179,7 +179,7 @@ internal object CarPlayScreenProbe {
         try {
             CarlifeConnectService.requestKeyFrame()
             val writer = CarPlayVideoWriter(video.getOutputStream(), key)
-            var frames = 0
+            var frames = 0L
             var keyFrameDeadline = Long.MAX_VALUE
             var sentBytes = 0L
             var longestWriteMs = 0L
@@ -189,7 +189,7 @@ internal object CarPlayScreenProbe {
             var firstNtp = 0L
             while (!video.isClosed && CarlifeConnectService.state.value.active) {
                 val now = SystemClock.elapsedRealtime()
-                if (frames == 0 && CarlifeConnectService.state.value.phase == CapturePhase.RECEIVING) {
+                if (frames == 0L && CarlifeConnectService.state.value.phase == CapturePhase.RECEIVING) {
                     if (keyFrameDeadline == Long.MAX_VALUE) keyFrameDeadline = now + FIRST_KEY_FRAME_TIMEOUT_MS
                     if (now >= keyFrameDeadline) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
                 }
@@ -206,7 +206,7 @@ internal object CarPlayScreenProbe {
                 // The AVC configuration describes the actual capture, even after a receiver resize.
                 val writeStarted = SystemClock.elapsedRealtime()
                 frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
-                if (frames == 0) {
+                if (frames == 0L) {
                     firstPtsUs = frame.ptsUs
                     firstNtp = CarPlayTiming.now()
                 }
@@ -217,12 +217,12 @@ internal object CarPlayScreenProbe {
                 frames++
                 sentBytes += frame.payload.size
                 longestWriteMs = maxOf(longestWriteMs, SystemClock.elapsedRealtime() - writeStarted)
-                if (frames == 1) {
+                if (frames == 1L) {
                     onStreamStarted()
                     onStage("正在投屏 · 已发送 CarWith 首个视频关键帧")
                 }
             }
-            if (frames == 0) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
+            if (frames == 0L) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
             return "投屏已结束 · 已发送 $frames 帧 CarWith 视频"
         } finally {
             CarWithVideoFeed.unsubscribe(feed)
