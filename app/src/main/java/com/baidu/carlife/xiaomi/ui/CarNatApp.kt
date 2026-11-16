@@ -65,6 +65,7 @@ import com.baidu.carlife.xiaomi.ui.settings.DeveloperSettingsScreen
 import com.baidu.carlife.xiaomi.ui.settings.AboutScreen
 import com.baidu.carlife.xiaomi.ui.settings.ProjectionLogScreen
 import com.baidu.carlife.xiaomi.ui.settings.SettingEntry
+import com.baidu.carlife.xiaomi.ui.settings.UpdateScreen
 import com.baidu.carlife.xiaomi.ui.settings.SettingsScreen
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
@@ -159,6 +160,7 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
                             when (setting) {
                                 SettingEntry.LOGS -> ProjectionLogScreen(active)
                                 SettingEntry.ABOUT -> AboutScreen(active)
+                                SettingEntry.UPDATE -> UpdateScreen(active)
                                 SettingEntry.DEVELOPER -> Unit
                             }
                         },

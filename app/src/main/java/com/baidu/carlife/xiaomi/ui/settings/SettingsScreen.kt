@@ -68,6 +68,7 @@ import kotlin.math.roundToInt
 internal enum class SettingEntry(val route: String, val title: String) {
     LOGS("settings/logs", "投屏日志"),
     DEVELOPER("settings/developer", "开发者选项"),
+    UPDATE("settings/update", "应用更新"),
     ABOUT("settings/about", "关于"),
 }
 
@@ -127,6 +128,10 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             }) { onOpen(SettingEntry.LOGS) }
             SettingsDivider()
             SettingsRow("开发者选项", "网络配对码", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_code_xml), contentDescription = null) }) { onOpen(SettingEntry.DEVELOPER) }
+            SettingsDivider()
+            SettingsRow("应用更新", "检查新版本与切换更新源", active, false, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_update), contentDescription = null)
+            }) { onOpen(SettingEntry.UPDATE) }
             SettingsDivider()
             SettingsRow("关于", "版本与项目信息", active, false, leadingIcon = {
                 Icon(painterResource(R.drawable.ic_info), contentDescription = null)

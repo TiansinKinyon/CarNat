@@ -36,11 +36,11 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import com.baidu.carlife.xiaomi.R
+import com.baidu.carlife.xiaomi.update.UpdateSource
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
 private val appIconSize = 80.dp
-private const val GITHUB_REPOSITORY = "https://github.com/TiansinKinyon/CarNat"
-private const val GITEE_REPOSITORY = "https://gitee.com/TiansinKinyon/CarNat"
+
 
 @Composable
 internal fun AboutScreen(active: Boolean) {
@@ -105,7 +105,7 @@ private fun AboutContent(
                 "TiansinKinyon/CarNat",
                 icon = R.drawable.ic_github,
                 modifier = Modifier.clickable(enabled = active, role = Role.Button) {
-                    onOpenRepository(GITHUB_REPOSITORY)
+                    onOpenRepository(UpdateSource.GITHUB.repository)
                 },
             )
             SettingsDivider()
@@ -114,7 +114,7 @@ private fun AboutContent(
                 "TiansinKinyon/CarNat",
                 icon = R.drawable.ic_gitee,
                 modifier = Modifier.clickable(enabled = active, role = Role.Button) {
-                    onOpenRepository(GITEE_REPOSITORY)
+                    onOpenRepository(UpdateSource.GITEE.repository)
                 },
             )
         }
