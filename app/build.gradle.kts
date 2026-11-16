@@ -23,8 +23,8 @@ android {
     buildTypes {
         release {
             optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
+                // Scoped R8 optimization produced an IllegalAccessError during AndroidX startup.
+                enable = false
             }
         }
     }
