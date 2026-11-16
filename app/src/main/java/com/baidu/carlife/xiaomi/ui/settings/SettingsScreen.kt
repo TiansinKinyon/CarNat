@@ -68,6 +68,7 @@ import kotlin.math.roundToInt
 internal enum class SettingEntry(val route: String, val title: String) {
     LOGS("settings/logs", "投屏日志"),
     DEVELOPER("settings/developer", "开发者选项"),
+    ABOUT("settings/about", "关于"),
 }
 
 private enum class Editor(val title: String) {
@@ -126,6 +127,10 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             }) { onOpen(SettingEntry.LOGS) }
             SettingsDivider()
             SettingsRow("开发者选项", "网络配对码", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_code_xml), contentDescription = null) }) { onOpen(SettingEntry.DEVELOPER) }
+            SettingsDivider()
+            SettingsRow("关于", "版本与项目信息", active, false, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_info), contentDescription = null)
+            }) { onOpen(SettingEntry.ABOUT) }
         }
     }
 
@@ -347,7 +352,7 @@ private fun ProjectionEditor(
 }
 
 @Composable
-private fun SettingsLayout(content: @Composable () -> Unit) {
+internal fun SettingsLayout(content: @Composable () -> Unit) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -355,7 +360,7 @@ private fun SettingsLayout(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SettingsCard(content: @Composable () -> Unit) {
+internal fun SettingsCard(content: @Composable () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) { content() }
 }
 
@@ -393,7 +398,7 @@ private fun showSettingsLocked(context: Context) {
 }
 
 @Composable
-private fun SettingsDivider() = HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+internal fun SettingsDivider() = HorizontalDivider(Modifier.padding(horizontal = 16.dp))
 
 @Composable
 private fun NumberField(

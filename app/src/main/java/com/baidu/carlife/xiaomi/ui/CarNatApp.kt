@@ -62,6 +62,7 @@ import com.baidu.carlife.xiaomi.ui.monitoring.MonitoringScreen
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionReadyPreviewContent
 import com.baidu.carlife.xiaomi.ui.projection.ProjectionScreen
 import com.baidu.carlife.xiaomi.ui.settings.DeveloperSettingsScreen
+import com.baidu.carlife.xiaomi.ui.settings.AboutScreen
 import com.baidu.carlife.xiaomi.ui.settings.ProjectionLogScreen
 import com.baidu.carlife.xiaomi.ui.settings.SettingEntry
 import com.baidu.carlife.xiaomi.ui.settings.SettingsScreen
@@ -149,12 +150,18 @@ private fun CarNatNavigation(connectionPage: @Composable (Boolean) -> Unit) {
         }
         SettingEntry.entries.forEach { setting ->
             composable(setting.route) { entry ->
-                if (setting == SettingEntry.LOGS) {
+                if (setting != SettingEntry.DEVELOPER) {
                     NavigationPage(
                         active = isPageActive(entry),
                         title = setting.title,
                         onBack = { navController.popBackStack() },
-                        content = { active -> ProjectionLogScreen(active) },
+                        content = { active ->
+                            when (setting) {
+                                SettingEntry.LOGS -> ProjectionLogScreen(active)
+                                SettingEntry.ABOUT -> AboutScreen(active)
+                                SettingEntry.DEVELOPER -> Unit
+                            }
+                        },
                     )
                 } else DeveloperSettingsScreen { actions, body ->
                     NavigationPage(
