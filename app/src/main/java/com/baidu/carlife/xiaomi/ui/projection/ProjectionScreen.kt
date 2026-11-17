@@ -312,7 +312,7 @@ private fun ProjectionContent(
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text("从 CarWith 开始连接", style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "在 CarWith 中依次打开「CarLife 连接」「无线连接」「车辆热点」，然后点「开始连接」。",
+                                    "当前连接方式为 CarWith 发起，请在 CarWith > CarLife 连接 > 无线连接 > 车辆热点 中选择车机蓝牙并开始连接。",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = colors.onSurfaceVariant,
                                 )
@@ -342,8 +342,8 @@ private fun ProjectionContent(
                         Text(when {
                             addressError && phoneAddress.isBlank() -> "请填写本机蓝牙地址"
                             addressError -> "请输入有效的蓝牙地址"
-                            !manual -> "WinPlay 等接收端需要真实地址，输入有效地址后自动保存"
-                            else -> "在关于手机的设备信息或状态中查找蓝牙地址"
+                            !manual -> "建议填写，部分车机连接时可能需要该内容"
+                            else -> "在 关于手机 的 设备信息或状态 中查找蓝牙地址"
                         })
                     },
                     isError = addressError,
@@ -388,7 +388,8 @@ private fun ProjectionContent(
             onDismissRequest = { showAddressHelp = false },
             title = { Text("如何查找本机蓝牙地址") },
             text = { Text("在 系统设置 > 关于手机 里查找本机蓝牙地址，因机型而异。\n\n" +
-                    "小米 HyperOS：我的设备 > 全部参数与信息 > 状态信息 > 蓝牙地址") },
+                    "小米 HyperOS：我的设备 > 全部参数与信息 > 状态信息 > 蓝牙地址 \n\n" +
+                    "在 CarWith 发起模式下，部分车机需要该内容才能发起连接。") },
             dismissButton = {
                 TextButton(onClick = { showAddressHelp = false }) { Text("取消") }
             },

@@ -288,7 +288,7 @@ private fun ProjectionEditor(
                 SettingCheckbox("跟随车机", followReceiver) { followReceiver = it }
                 NumberField("水平分辨率（px）", width, enabled = !followReceiver, leadingIcon = { Icon(painterResource(R.drawable.ic_fit_page_width), contentDescription = null) }) { width = it }
                 NumberField("垂直分辨率（px）", height, enabled = !followReceiver, leadingIcon = { Icon(painterResource(R.drawable.ic_fit_page_height), contentDescription = null) }) { height = it }
-                Text("水平与垂直分辨率应为 320–4096 范围内的整数。")
+                Text("水平与垂直分辨率应为 320–4096 范围内的整数，分辨率过高可能引发卡顿与掉线。")
             }
         }
         Editor.FPS -> {
@@ -300,7 +300,7 @@ private fun ProjectionEditor(
                 { onSave(current.copy(fpsLimit = null)) }) {
                 SettingCheckbox("跟随车机", followReceiver) { followReceiver = it }
                 NumberField("帧率上限（fps）", value, enabled = !followReceiver) { value = it }
-                Text("自定义范围为 10–120 fps。宽高也设为自定义时，直接按手动值启动。")
+                Text("自定义范围为 10–120 fps，建议使用 30 fps 以获得更好的兼容性。")
             }
         }
         Editor.BITRATE -> {

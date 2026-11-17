@@ -6,8 +6,8 @@ import java.security.MessageDigest
 import java.util.Locale
 
 internal enum class ConnectionMode(val label: String, val summary: String) {
-    CAR_WITH("CarWith 发起", "通过 CarWith 的车辆热点连接，使用其已保存的连接记录自动启动"),
-    MANUAL("CarNat 接管", "在 CarNat 选择已配对的车机并开始投屏");
+    CAR_WITH("CarWith 发起（推荐）", "通过 CarWith 发起连接，支持连接到车载蓝牙时自动启动"),
+    MANUAL("CarNat 接管", "手动通过 CarNat 发起连接");
 
     fun save(context: Context) = preferences(context).edit().putString("mode", name).apply()
 
