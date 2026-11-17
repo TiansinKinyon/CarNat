@@ -134,7 +134,19 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         autoNeedsPermissions = autoNeedsPermissions,
         settings = settings,
         phoneAddress = phoneAddress,
-        onAddressChange = { phoneAddress = it.trim().uppercase(Locale.ROOT).take(17) },
+        onAddressChange = { input ->
+            val address = input.trim().uppercase(Locale.ROOT).take(17)
+            phoneAddress = address
+            if (mode == ConnectionMode.CAR_WITH && address != settings.address && ReceiverSettings.validAddress(address)) {
+                val updated = settings.copy(address = address)
+                if (updated.savePhoneAddress(context)) {
+                    settings = updated
+                    error = null
+                } else {
+                    error = "无法保存本机蓝牙地址"
+                }
+            }
+        },
         onOpenDeviceInfo = { openDeviceInfoSettings(context) },
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
@@ -145,6 +157,7 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
                 selectedAddress = settings.receiverAddress,
                 devices = devices,
                 enabled = active && !status.active && mode == ConnectionMode.MANUAL,
+                managedByCarWith = mode == ConnectionMode.CAR_WITH,
                 expanded = expanded && active,
                 onDismiss = { expanded = false },
                 onOpen = {
@@ -203,7 +216,7 @@ private fun ProjectionContent(
     val addressFocus = remember { FocusRequester() }
     var addressRequired by rememberSaveable { mutableStateOf(false) }
     var showAddressHelp by rememberSaveable { mutableStateOf(false) }
-    val addressError = manual && !validAddress && (addressRequired || phoneAddress.isNotEmpty())
+    val addressError = !validAddress && (phoneAddress.isNotEmpty() || manual && addressRequired)
     val connectionError = error ?: status.error
     val showError = supported && (
         connectionError != null || status.phase == CapturePhase.FAILED ||
@@ -282,7 +295,7 @@ private fun ProjectionContent(
                 OutlinedTextField(
                     leadingIcon = { Icon(painterResource(R.drawable.ic_settings_bluetooth), contentDescription = null) },
                     trailingIcon = {
-                        IconButton(enabled = manual && !status.active, onClick = { showAddressHelp = true }) {
+                        IconButton(enabled = !status.active, onClick = { showAddressHelp = true }) {
                             Icon(
                                 painterResource(R.drawable.ic_help),
                                 contentDescription = "如何查找本机蓝牙地址",
@@ -297,14 +310,15 @@ private fun ProjectionContent(
                     label = { Text("本机蓝牙地址") },
                     placeholder = { Text("AA:BB:CC:DD:EE:FF") },
                     supportingText = {
-                        if (manual) Text(when {
+                        Text(when {
                             addressError && phoneAddress.isBlank() -> "请填写本机蓝牙地址"
                             addressError -> "请输入有效的蓝牙地址"
+                            !manual -> "WinPlay 等接收端需要真实地址，输入有效地址后自动保存"
                             else -> "在关于手机的设备信息或状态中查找蓝牙地址"
                         })
                     },
                     isError = addressError,
-                    enabled = manual && !status.active,
+                    enabled = !status.active,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Characters,
@@ -340,7 +354,7 @@ private fun ProjectionContent(
             )
         }
     }
-    if (supported && manual && showAddressHelp) {
+    if (supported && showAddressHelp) {
         AlertDialog(
             onDismissRequest = { showAddressHelp = false },
             title = { Text("如何查找本机蓝牙地址") },
@@ -520,6 +534,7 @@ private fun ProjectionPreviewContent(status: CaptureStatus, manual: Boolean = tr
                 selectedAddress = "02:00:00:00:00:01",
                 devices = emptyList(),
                 enabled = manual && !status.active,
+                managedByCarWith = !manual,
                 expanded = false,
                 onDismiss = {},
                 onOpen = {},
@@ -550,6 +565,7 @@ private fun ReceiverPicker(
     selectedAddress: String,
     devices: List<PairedReceiver>?,
     enabled: Boolean,
+    managedByCarWith: Boolean,
     expanded: Boolean,
     onDismiss: () -> Unit,
     onOpen: () -> Unit,
@@ -561,7 +577,7 @@ private fun ReceiverPicker(
         onExpandedChange = { if (enabled && it) onOpen() else onDismiss() },
     ) {
         OutlinedTextField(
-            value = selectedName,
+            value = if (managedByCarWith) "" else selectedName,
             onValueChange = {},
             enabled = enabled,
             readOnly = true,
@@ -569,6 +585,9 @@ private fun ReceiverPicker(
             leadingIcon = { Icon(painterResource(R.drawable.ic_bluetooth_drive), contentDescription = null) },
             label = { Text("车载蓝牙") },
             placeholder = { Text("选择已配对设备") },
+            supportingText = if (managedByCarWith) {
+                { Text("CarWith 发起模式下无需选择") }
+            } else null,
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(menuExpanded) },
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled).fillMaxWidth(),
         )
