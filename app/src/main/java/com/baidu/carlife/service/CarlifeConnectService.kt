@@ -53,6 +53,7 @@ import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
 import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
 import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
+import com.baidu.carlife.xiaomi.carplay.ConnectionMode
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -74,17 +75,23 @@ class CarlifeConnectService : Service() {
     private var stopping = false
 
     @android.annotation.SuppressLint("MissingPermission")
-    private fun startReceiver(capture: CaptureSession, expectedResolution: CarPlayResolution? = null) {
-        val readResolutionOnly = expectedResolution == null
+    private fun startReceiver(
+        capture: CaptureSession,
+        expectedResolution: CarPlayResolution? = null,
+        fromCarWith: Boolean = false,
+    ) {
+        val readResolutionOnly = expectedResolution == null && !fromCarWith
         val preferences = ProjectionPreferences.load(this)
         val settings = ReceiverSettings.load(this)
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         val missingPermissions = missingReceiverPermissions(this)
-        if (!settings.valid || adapter == null || missingPermissions.isNotEmpty()) {
+        if ((!fromCarWith && !settings.valid) || adapter == null || missingPermissions.isNotEmpty()) {
             ProjectionLog.event("接收端前置检查失败 · settingsValid=${settings.valid} adapterPresent=${adapter != null} missingPermissions=$missingPermissions")
             worker.post { capture.fail("请检查接收端设置和附近设备权限") }
             return
         }
+        val deviceId = settings.address.takeIf(ReceiverSettings::validAddress)
+            ?: ConnectionMode.automaticDeviceId(this)
         val probe = BluetoothReceiverProbe(getSystemService(ConnectivityManager::class.java))
         receiverProbe = probe
         val timeout = projectionScope.launch {
@@ -97,10 +104,11 @@ class CarlifeConnectService : Service() {
             var streamed = false
             var terminalError: String? = null
             var probedResolution: CarPlayResolution? = null
+            var captureResolution = expectedResolution
             try {
                 withContext(Dispatchers.IO) {
                     probe.run(
-                        adapter, settings.name, settings.networkPairingCode, settings.address,
+                        adapter, if (fromCarWith) "" else settings.name, settings.networkPairingCode, deviceId,
                         onStreamStarted = {
                             streamed = true
                             timeout.cancel()
@@ -126,15 +134,23 @@ class CarlifeConnectService : Service() {
                                 }
                             }
                         },
-                        receiverAddress = settings.receiverAddress,
+                        receiverAddress = if (fromCarWith) "" else settings.receiverAddress,
                         readResolutionOnly = readResolutionOnly,
                         preferences = preferences,
+                        retryAfterDisconnect = !fromCarWith,
                         onResolution = { resolution ->
-                            if (expectedResolution == null) {
+                            val currentResolution = captureResolution
+                            if (readResolutionOnly) {
                                 probedResolution = resolution
+                            } else if (currentResolution == null) {
+                                val chosen = preferences.applyTo(resolution)
+                                captureResolution = chosen
+                                projectionScope.launch {
+                                    if (receiverProbe === probe && !stopping) bindCapture(capture, chosen)
+                                }
                             } else {
                                 val changed = preferences.manualDisplayMode == null &&
-                                    !expectedResolution.matchesEncoderSettings(preferences.applyTo(resolution))
+                                    !currentResolution.matchesEncoderSettings(preferences.applyTo(resolution))
                                 projectionScope.launch {
                                     if (receiverProbe === probe) {
                                         mutableState.update { it.copy(receiverDisplayChanged = changed) }
@@ -165,18 +181,15 @@ class CarlifeConnectService : Service() {
                     ProjectionLog.failure("车机会话结束", failure)
                     Log.i("CarNatIap2", "Receiver session ended", failure)
                     val message = failure.message ?: "投屏连接失败"
-                    if (!streamed) {
-                        worker.post { capture.fail(message) }
-                    } else {
-                        terminalError = message
-                    }
+                    terminalError = message
+                    if (!streamed || fromCarWith) worker.post { capture.fail(message) }
                 }
             } finally {
                 timeout.cancel()
                 if (receiverProbe === probe) {
                     receiverProbe = null
                     dismissConnectingNotification()
-                    if (streamed) {
+                    if (streamed && !fromCarWith) {
                         mutableState.update {
                             it.copy(
                                 receiverConnection = ReceiverConnection.FAILED,
@@ -190,6 +203,7 @@ class CarlifeConnectService : Service() {
                     }
                     mutableReceiverDiagnostics.value = ReceiverDiagnostics()
                     probedResolution?.let(::prepareCarWithLaunch)
+                    if (streamed && fromCarWith && terminalError == null) worker.post { capture.end() }
                 }
             }
         }
@@ -284,12 +298,24 @@ class CarlifeConnectService : Service() {
             intent.getStringExtra("bindPackageName") == CAR_WITH_SERVICE.packageName &&
             intent.getStringExtra("bindClassName") == CAR_WITH_SERVICE.className
         val phase = mutableState.value.phase
+        val connectionType = intent?.getIntExtra("usb_type", -1) ?: -1
+        if (carWithRequest && connectionType == 0 && !phase.isActive && !stopping &&
+            Build.VERSION.SDK_INT >= 33 && ConnectionMode.load(this) == ConnectionMode.CAR_WITH
+        ) {
+            startForeground(NOTIFICATION_ID, projectionNotification())
+            showConnectingNotification()
+            ProjectionLog.event("CarWith 发起车辆热点连接")
+            mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER, connectionType = connectionType)
+            val capture = CaptureSession(videoBitrateKbps = ProjectionPreferences.load(this).videoBitrateKbps)
+            worker.post { session = capture }
+            startReceiver(capture, fromCarWith = true)
+            return START_NOT_STICKY
+        }
         val resolution = if (carWithRequest && !stopping && (phase == CapturePhase.ARMED || !phase.isActive)) {
             consumeLaunchTicket(this)
         } else null
         if (intent != null && resolution != null) {
             startForeground(NOTIFICATION_ID, projectionNotification())
-            val connectionType = intent.getIntExtra("usb_type", -1)
             ProjectionLog.event("CarWith 启动组件 · usb_type=$connectionType")
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
             showConnectingNotification()
@@ -317,22 +343,26 @@ class CarlifeConnectService : Service() {
     private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
         val preferences = ProjectionPreferences.load(this)
         val encoderResolution = preferences.applyTo(resolution)
-        val capture = CaptureSession(encoderResolution, preferences.videoBitrateKbps)
+        val capture = CaptureSession(videoBitrateKbps = preferences.videoBitrateKbps)
         main.removeCallbacks(armTimeout)
+        mutableState.update { it.copy(connectionType = connectionType) }
+        bindCapture(capture, encoderResolution)
+        startReceiver(capture, expectedResolution = encoderResolution)
+    }
+
+    private fun bindCapture(capture: CaptureSession, encoderResolution: CarPlayResolution) {
         mutableState.update {
             it.copy(
                 phase = CapturePhase.BINDING,
-                connectionType = connectionType,
-                targetVideoBitrateKbps = preferences.videoBitrateKbps,
+                targetVideoBitrateKbps = capture.videoBitrateKbps,
                 encoderFpsLimit = encoderResolution.frameRate,
                 receiverStatus = "正在准备 CarWith 画面",
             )
         }
         worker.post {
             session = capture
-            capture.bind()
+            capture.bind(encoderResolution)
         }
-        startReceiver(capture, expectedResolution = encoderResolution)
     }
 
     private fun failCarWithStartup(message: String) {
@@ -413,9 +443,9 @@ class CarlifeConnectService : Service() {
     }
 
     private inner class CaptureSession(
-        private val resolution: CarPlayResolution? = null,
-        private val videoBitrateKbps: Int = ProjectionPreferences.DEFAULT_BITRATE_KBPS,
+        val videoBitrateKbps: Int = ProjectionPreferences.DEFAULT_BITRATE_KBPS,
     ) : ServiceConnection {
+        private var resolution: CarPlayResolution? = null
         private var manager: ICarLifeCastManager? = null
         private var codec: MediaCodec? = null
         private var surface: Surface? = null
@@ -624,8 +654,9 @@ class CarlifeConnectService : Service() {
             override fun removeAudioListener(listener: IRemoteAudioListener?) = Unit
         }
 
-        fun bind() {
+        fun bind(size: CarPlayResolution) {
             if (closed) return
+            resolution = size
             try {
                 bound = bindService(Intent().setComponent(CAR_WITH_SERVICE), this, BIND_AUTO_CREATE)
                 if (bound) worker.postDelayed(timeout, 12_000)
@@ -801,6 +832,12 @@ class CarlifeConnectService : Service() {
                 (reason?.let { " · $it" } ?: ""))
             Log.w(TAG, message)
             mutableState.update { it.copy(phase = CapturePhase.FAILED, error = message) }
+            finish()
+            stopSelf()
+        }
+
+        fun end() {
+            if (closed) return
             finish()
             stopSelf()
         }

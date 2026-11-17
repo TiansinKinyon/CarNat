@@ -60,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AudioPreference
+import com.baidu.carlife.xiaomi.carplay.ConnectionMode
 import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
@@ -85,6 +86,8 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
     var editor by remember { mutableStateOf<Editor?>(null) }
     var error by remember { mutableStateOf(false) }
     val editable = active && !capture.active
+    var connectionMode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
+    var showConnectionMode by remember { mutableStateOf(false) }
 
     fun save(updated: ProjectionPreferences) {
         if (!editable) return
@@ -96,6 +99,11 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
     }
 
     SettingsLayout {
+        SettingsCard {
+            SettingsRow("连接方式", connectionMode.label, active, capture.active, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_connect), contentDescription = null)
+            }) { showConnectionMode = true }
+        }
         SettingsCard {
             SettingsRow(Editor.RESOLUTION.title, preferences.width?.let { "$it × ${preferences.height}" } ?: "跟随车机", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_aspect_ratio), contentDescription = null) }) {
                 editor = Editor.RESOLUTION
@@ -139,10 +147,48 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
         }
     }
 
+    if (showConnectionMode && editable) {
+        ConnectionModeDialog(connectionMode, onDismiss = { showConnectionMode = false }) { mode ->
+            mode.save(context)
+            connectionMode = mode
+            showConnectionMode = false
+        }
+    }
     val selected = editor
     if (selected != null && editable) {
         ProjectionEditor(selected, preferences, onDismiss = { editor = null }, onSave = ::save)
     }
+}
+
+@Composable
+private fun ConnectionModeDialog(
+    mode: ConnectionMode,
+    onDismiss: () -> Unit,
+    onSelect: (ConnectionMode) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("连接方式") },
+        text = {
+            Column(Modifier.selectableGroup()) {
+                ConnectionMode.entries.forEach { option ->
+                    ListItem(
+                        headlineContent = { Text(option.label) },
+                        supportingContent = { Text(option.summary) },
+                        leadingContent = { RadioButton(selected = mode == option, onClick = null) },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        modifier = Modifier.selectable(
+                            selected = mode == option,
+                            role = Role.RadioButton,
+                            onClick = { onSelect(option) },
+                        ),
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable

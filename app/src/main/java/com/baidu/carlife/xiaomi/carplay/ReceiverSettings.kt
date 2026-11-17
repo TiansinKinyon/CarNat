@@ -8,6 +8,9 @@ internal data class ReceiverSettings(val name: String = "", val address: String 
     fun saveReceiver(context: Context): Boolean = preferences(context).edit()
         .putString("name", name).putString("receiverAddress", receiverAddress).commit()
 
+    fun savePhoneAddress(context: Context): Boolean = preferences(context).edit()
+        .putString("address", address).commit()
+
     val networkPairingCode: String get() = pin.ifEmpty { "3939" }
 
     fun save(context: Context): Boolean = preferences(context).edit()

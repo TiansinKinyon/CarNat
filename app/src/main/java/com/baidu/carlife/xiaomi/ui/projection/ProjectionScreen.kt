@@ -72,6 +72,7 @@ import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.service.ReceiverConnection
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
+import com.baidu.carlife.xiaomi.carplay.ConnectionMode
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 import java.util.Locale
@@ -80,12 +81,20 @@ import java.util.Locale
 internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val status by CarlifeConnectService.state.collectAsState()
+    var mode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
+    var autoNeedsPermissions by remember { mutableStateOf(missingReceiverPermissions(context).isNotEmpty()) }
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
     var phoneAddress by rememberSaveable { mutableStateOf(settings.address.uppercase(Locale.ROOT)) }
     var error by remember { mutableStateOf<String?>(null) }
     var devices by remember { mutableStateOf<List<PairedReceiver>?>(null) }
     var expanded by remember { mutableStateOf(false) }
     LaunchedEffect(active, status.active) {
+        if (active) {
+            val selectedMode = ConnectionMode.load(context)
+            if (mode != selectedMode) error = null
+            mode = selectedMode
+            autoNeedsPermissions = missingReceiverPermissions(context).isNotEmpty()
+        }
         if (!active || status.active) expanded = false
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -114,15 +123,30 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         if (Manifest.permission.POST_NOTIFICATIONS in grants) {
             notificationPermissions.edit().putBoolean("requested", true).apply()
         }
-        if (missingReceiverPermissions(context).isEmpty()) beginProjection()
-        else error = "请允许附近设备和局域网访问权限，以连接车机"
+        autoNeedsPermissions = missingReceiverPermissions(context).isNotEmpty()
+        if (autoNeedsPermissions) error = "请允许附近设备和局域网访问权限，以连接车机"
+        else if (mode == ConnectionMode.MANUAL) beginProjection()
     }
     ProjectionContent(
         modifier = modifier,
         status = status,
+        manual = mode == ConnectionMode.MANUAL,
+        autoNeedsPermissions = autoNeedsPermissions,
         settings = settings,
         phoneAddress = phoneAddress,
-        onAddressChange = { phoneAddress = it.trim().uppercase(Locale.ROOT).take(17) },
+        onAddressChange = { input ->
+            val address = input.trim().uppercase(Locale.ROOT).take(17)
+            phoneAddress = address
+            if (mode == ConnectionMode.CAR_WITH && address != settings.address && ReceiverSettings.validAddress(address)) {
+                val updated = settings.copy(address = address)
+                if (updated.savePhoneAddress(context)) {
+                    settings = updated
+                    error = null
+                } else {
+                    error = "无法保存本机蓝牙地址"
+                }
+            }
+        },
         onOpenDeviceInfo = { openDeviceInfoSettings(context) },
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
@@ -132,7 +156,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
                 selectedName = selectedName,
                 selectedAddress = settings.receiverAddress,
                 devices = devices,
-                enabled = !status.active,
+                enabled = active && !status.active && mode == ConnectionMode.MANUAL,
+                managedByCarWith = mode == ConnectionMode.CAR_WITH,
                 expanded = expanded && active,
                 onDismiss = { expanded = false },
                 onOpen = {
@@ -164,8 +189,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
                 ) {
                     missing.add(Manifest.permission.POST_NOTIFICATIONS)
                 }
-                if (missing.isEmpty()) beginProjection()
-                else projectionPermissions.launch(missing.toTypedArray())
+                if (missing.isNotEmpty()) projectionPermissions.launch(missing.toTypedArray())
+                else if (mode == ConnectionMode.MANUAL) beginProjection()
             }
         },
     )
@@ -175,6 +200,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
 private fun ProjectionContent(
     status: CaptureStatus,
     settings: ReceiverSettings,
+    manual: Boolean = true,
+    autoNeedsPermissions: Boolean = false,
     phoneAddress: String,
     onAddressChange: (String) -> Unit,
     onOpenDeviceInfo: () -> Unit,
@@ -189,7 +216,7 @@ private fun ProjectionContent(
     val addressFocus = remember { FocusRequester() }
     var addressRequired by rememberSaveable { mutableStateOf(false) }
     var showAddressHelp by rememberSaveable { mutableStateOf(false) }
-    val addressError = !validAddress && (addressRequired || phoneAddress.isNotEmpty())
+    val addressError = !validAddress && (phoneAddress.isNotEmpty() || manual && addressRequired)
     val connectionError = error ?: status.error
     val showError = supported && (
         connectionError != null || status.phase == CapturePhase.FAILED ||
@@ -264,11 +291,40 @@ private fun ProjectionContent(
                 ProjectionStatusMessage(message, receiverLink)
             }
             if (supported) {
+                if (!manual) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = colors.surfaceContainer,
+                            contentColor = colors.onSurface,
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Icon(
+                                painterResource(R.drawable.ic_info),
+                                contentDescription = null,
+                                tint = colors.primary,
+                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("从 CarWith 开始连接", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "在 CarWith 中依次打开「CarLife 连接」「无线连接」「车辆热点」，然后点「开始连接」。",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
                 receiverPicker()
                 OutlinedTextField(
                     leadingIcon = { Icon(painterResource(R.drawable.ic_settings_bluetooth), contentDescription = null) },
                     trailingIcon = {
-                        IconButton(onClick = { showAddressHelp = true }) {
+                        IconButton(enabled = !status.active, onClick = { showAddressHelp = true }) {
                             Icon(
                                 painterResource(R.drawable.ic_help),
                                 contentDescription = "如何查找本机蓝牙地址",
@@ -286,6 +342,7 @@ private fun ProjectionContent(
                         Text(when {
                             addressError && phoneAddress.isBlank() -> "请填写本机蓝牙地址"
                             addressError -> "请输入有效的蓝牙地址"
+                            !manual -> "WinPlay 等接收端需要真实地址，输入有效地址后自动保存"
                             else -> "在关于手机的设备信息或状态中查找蓝牙地址"
                         })
                     },
@@ -300,8 +357,8 @@ private fun ProjectionContent(
                 )
             }
         }
-        if (supported) {
-            val buttonReady = status.active || (settings.receiverAddress.isNotBlank() && validAddress)
+        if (supported && (manual || status.active || autoNeedsPermissions)) {
+            val buttonReady = status.active || !manual || (settings.receiverAddress.isNotBlank() && validAddress)
             ExtendedFloatingActionButton(
                 onClick = {
                     when {
@@ -316,7 +373,13 @@ private fun ProjectionContent(
                 containerColor = if (buttonReady) colors.primaryContainer else colors.surfaceContainerHighest,
                 contentColor = if (buttonReady) colors.onPrimaryContainer else colors.onSurface.copy(alpha = 0.38f),
                 icon = { Icon(painterResource(R.drawable.ic_cast), contentDescription = null) },
-                text = { Text(if (status.active) "停止投屏" else "开始投屏") },
+                text = {
+                    Text(when {
+                        status.active -> "停止投屏"
+                        manual -> "开始投屏"
+                        else -> "授予连接权限"
+                    })
+                },
             )
         }
     }
@@ -477,10 +540,17 @@ internal fun ProjectionReadyPreviewContent() {
     ProjectionPreviewContent(CaptureStatus())
 }
 
+@Preview(name = "CarWith 发起", showBackground = true, widthDp = 360)
 @Composable
-private fun ProjectionPreviewContent(status: CaptureStatus) {
+private fun ProjectionCarWithPreview() {
+    CarNatTheme { ProjectionPreviewContent(CaptureStatus(), manual = false) }
+}
+
+@Composable
+private fun ProjectionPreviewContent(status: CaptureStatus, manual: Boolean = true) {
     ProjectionContent(
         status = status,
+        manual = manual,
         settings = ReceiverSettings(name = "CarPlay 接收端", receiverAddress = "02:00:00:00:00:01"),
         phoneAddress = "02:12:34:56:78:90",
         onAddressChange = {},
@@ -492,7 +562,8 @@ private fun ProjectionPreviewContent(status: CaptureStatus) {
                 selectedName = "CarPlay 接收端",
                 selectedAddress = "02:00:00:00:00:01",
                 devices = emptyList(),
-                enabled = !status.active,
+                enabled = manual && !status.active,
+                managedByCarWith = !manual,
                 expanded = false,
                 onDismiss = {},
                 onOpen = {},
@@ -523,6 +594,7 @@ private fun ReceiverPicker(
     selectedAddress: String,
     devices: List<PairedReceiver>?,
     enabled: Boolean,
+    managedByCarWith: Boolean,
     expanded: Boolean,
     onDismiss: () -> Unit,
     onOpen: () -> Unit,
@@ -534,7 +606,7 @@ private fun ReceiverPicker(
         onExpandedChange = { if (enabled && it) onOpen() else onDismiss() },
     ) {
         OutlinedTextField(
-            value = selectedName,
+            value = if (managedByCarWith) "" else selectedName,
             onValueChange = {},
             enabled = enabled,
             readOnly = true,
@@ -542,6 +614,9 @@ private fun ReceiverPicker(
             leadingIcon = { Icon(painterResource(R.drawable.ic_bluetooth_drive), contentDescription = null) },
             label = { Text("车载蓝牙") },
             placeholder = { Text("选择已配对设备") },
+            supportingText = if (managedByCarWith) {
+                { Text("CarWith 发起模式下无需选择") }
+            } else null,
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(menuExpanded) },
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled).fillMaxWidth(),
         )
