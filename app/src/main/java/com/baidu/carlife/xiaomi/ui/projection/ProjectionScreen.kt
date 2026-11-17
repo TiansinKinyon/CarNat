@@ -250,7 +250,7 @@ private fun ProjectionContent(
             CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
             CapturePhase.RECEIVING -> "正在投屏"
             CapturePhase.STOPPED -> "投屏已停止"
-            else -> if (manual) "等待连接" else "请在 CarWith 的「车辆热点」中开始连接"
+            else -> "等待连接"
         }
     }
     Box(modifier.fillMaxSize()) {
@@ -291,6 +291,35 @@ private fun ProjectionContent(
                 ProjectionStatusMessage(message, receiverLink)
             }
             if (supported) {
+                if (!manual) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = colors.surfaceContainer,
+                            contentColor = colors.onSurface,
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Icon(
+                                painterResource(R.drawable.ic_info),
+                                contentDescription = null,
+                                tint = colors.primary,
+                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("从 CarWith 开始连接", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "在 CarWith 中依次打开「CarLife 连接」「无线连接」「车辆热点」，然后点「开始连接」。",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
                 receiverPicker()
                 OutlinedTextField(
                     leadingIcon = { Icon(painterResource(R.drawable.ic_settings_bluetooth), contentDescription = null) },
