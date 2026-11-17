@@ -3,7 +3,12 @@ package com.baidu.carlife.xiaomi.carplay
 import java.nio.ByteBuffer
 
 internal object AvcPayload {
+    const val MAX_ACCESS_UNIT_BYTES = 4 * 1024 * 1024
+    const val MAX_CONFIGURATION_BYTES = 64 * 1024
+    private const val MAX_ANNEX_B_UNITS = 4096
+
     fun configuration(spsBuffer: ByteBuffer, ppsBuffer: ByteBuffer?): ByteArray {
+        require(spsBuffer.remaining().toLong() + (ppsBuffer?.remaining() ?: 0) <= MAX_CONFIGURATION_BYTES)
         val spsBytes = spsBuffer.copyBytes()
         val ppsBytes = ppsBuffer?.copyBytes()
         val units = parameterSets(spsBytes) + (ppsBytes?.let(::parameterSets) ?: emptyList())
@@ -15,7 +20,9 @@ internal object AvcPayload {
         }
 
         val firstSps = sequenceSets.first()
-        val output = ByteBuffer.allocate(7 + (sequenceSets + pictureSets).sumOf { it.size + 2 })
+        val size = 7 + (sequenceSets + pictureSets).sumOf { it.size + 2 }
+        require(size <= MAX_CONFIGURATION_BYTES)
+        val output = ByteBuffer.allocate(size)
         output.put(1)
         output.put(firstSps[1]).put(firstSps[2]).put(firstSps[3])
         output.put(0xff.toByte()).put((0xe0 or sequenceSets.size).toByte())
@@ -27,11 +34,14 @@ internal object AvcPayload {
 
     fun accessUnit(buffer: ByteBuffer): ByteArray {
         val source = buffer.duplicate()
+        require(source.remaining() in 1..MAX_ACCESS_UNIT_BYTES)
         if (isLengthPrefixed(source)) return source.copyBytes()
 
         val units = splitAnnexB(source.copyBytes())
         require(units.isNotEmpty()) { "Invalid AVC access unit" }
-        val output = ByteBuffer.allocate(units.sumOf { 4 + it.size })
+        val size = units.sumOf { 4 + it.size }
+        require(size <= MAX_ACCESS_UNIT_BYTES)
+        val output = ByteBuffer.allocate(size)
         units.forEach { output.putInt(it.size).put(it) }
         return output.array()
     }
@@ -85,6 +95,7 @@ internal object AvcPayload {
                     if (start < 0 && end != 0) return emptyList()
                     if (start >= 0) {
                         require(end > start) { "Empty Annex B NAL unit" }
+                        require(units.size < MAX_ANNEX_B_UNITS) { "Too many AVC NAL units" }
                         units += data.copyOfRange(start, end)
                     }
                     start = index + 1
@@ -96,6 +107,7 @@ internal object AvcPayload {
         if (start >= 0) {
             val end = data.size - zeros
             require(end > start) { "Empty Annex B NAL unit" }
+            require(units.size < MAX_ANNEX_B_UNITS) { "Too many AVC NAL units" }
             units += data.copyOfRange(start, end)
         }
         return units

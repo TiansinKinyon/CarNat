@@ -5,7 +5,6 @@ import android.os.SystemClock
 import com.baidu.carlife.service.CapturePhase
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
-import com.dd.plist.BinaryPropertyListParser
 import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSArray
 import com.dd.plist.NSDictionary
@@ -18,6 +17,7 @@ import java.net.Socket
 import java.security.SecureRandom
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 /** Negotiates the primary display on an authenticated control connection. */
 internal object CarPlayScreenProbe {
@@ -25,6 +25,7 @@ internal object CarPlayScreenProbe {
     private val plistHeaders = mapOf("Content-Type" to "application/x-apple-binary-plist")
     private const val MAIN_SCREEN = CarPlayDisplay.MAIN_SCREEN
     private const val FIRST_KEY_FRAME_TIMEOUT_MS = 8_000L
+    private const val VIDEO_WRITE_TIMEOUT_MS = 5_000L
 
     fun run(
         host: InetAddress,
@@ -210,7 +211,27 @@ internal object CarPlayScreenProbe {
         onStage: (String) -> Unit,
     ): String {
         val feed = CarWithVideoFeed.subscribe()
+        val writeStartedNs = AtomicLong()
+        val watchdog = Thread({
+            try {
+                while (!video.isClosed) {
+                    Thread.sleep(250)
+                    val started = writeStartedNs.get()
+                    if (started != 0L && System.nanoTime() - started >= VIDEO_WRITE_TIMEOUT_MS * 1_000_000 &&
+                        writeStartedNs.compareAndSet(started, 0)
+                    ) {
+                        // Closing the socket interrupts a write even when the control channel still responds.
+                        runCatching { video.close() }
+                        ProjectionLog.event("CarPlay 视频写入超时，已关闭视频连接")
+                        break
+                    }
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }, "CarPlay video watchdog").apply { isDaemon = true }
         try {
+            watchdog.start()
             CarlifeConnectService.requestKeyFrame()
             val writer = CarPlayVideoWriter(video.getOutputStream(), key)
             var frames = 0L
@@ -229,7 +250,12 @@ internal object CarPlayScreenProbe {
                     if (now >= keyFrameDeadline) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
                 }
                 if (now >= nextKeepAlive) {
-                    writer.writeKeepAlive()
+                    writeStartedNs.set(System.nanoTime())
+                    try {
+                        writer.writeKeepAlive()
+                    } finally {
+                        writeStartedNs.set(0)
+                    }
                     nextKeepAlive = now + 1_000
                 }
                 if (now >= nextReport) {
@@ -244,7 +270,6 @@ internal object CarPlayScreenProbe {
                 val frame = feed.poll(200) ?: continue
                 // The AVC configuration describes the actual capture, even after a receiver resize.
                 val writeStarted = SystemClock.elapsedRealtime()
-                frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
                 if (frames == 0L) {
                     firstPtsUs = frame.ptsUs
                     firstNtp = CarPlayTiming.now()
@@ -252,7 +277,13 @@ internal object CarPlayScreenProbe {
                 val elapsedUs = frame.ptsUs - firstPtsUs
                 val offset = ((elapsedUs / 1_000_000) shl 32) +
                     (((elapsedUs % 1_000_000) shl 32) / 1_000_000)
-                writer.writeAccessUnit(frame.payload, firstNtp + offset)
+                writeStartedNs.set(System.nanoTime())
+                try {
+                    frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
+                    writer.writeAccessUnit(frame.payload, firstNtp + offset)
+                } finally {
+                    writeStartedNs.set(0)
+                }
                 frames++
                 sentBytes += frame.payload.size
                 longestWriteMs = maxOf(longestWriteMs, SystemClock.elapsedRealtime() - writeStarted)
@@ -264,6 +295,7 @@ internal object CarPlayScreenProbe {
             if (frames == 0L) throw ProtocolException("CarWith 未提供可发送的视频关键帧")
             return "投屏已结束 · 已发送 $frames 帧 CarWith 视频"
         } finally {
+            watchdog.interrupt()
             CarWithVideoFeed.unsubscribe(feed)
         }
     }
@@ -276,9 +308,7 @@ internal object CarPlayScreenProbe {
         return response.body
     }
 
-    private fun parse(body: ByteArray): NSDictionary =
-        BinaryPropertyListParser.parse(body) as? NSDictionary
-            ?: throw ProtocolException("接收端返回的二进制 plist 不是字典")
+    private fun parse(body: ByteArray): NSDictionary = CarPlayPlist.readDictionary(body)
 
     private fun port(body: NSDictionary, key: String): Int {
         val number = body.objectForKey(key) as? NSNumber
