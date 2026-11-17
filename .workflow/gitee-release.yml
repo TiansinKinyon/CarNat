@@ -1,0 +1,42 @@
+version: '1.0'
+name: carnat-android-release
+displayName: CarNat Android Release
+triggers:
+  push:
+    tags:
+      include:
+        - '^v[0-9]+\.[0-9]+\.[0-9]+$'
+stages:
+  - name: build
+    displayName: Build and sign APK
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: build@gradle
+        name: build_android
+        displayName: Build CarNat
+        jdkVersion: '17'
+        gradleVersion: '4.4'
+        commands:
+          - bash .workflow/build-gitee-release.sh
+        artifacts:
+          - name: CARNAT_APK
+            path:
+              - release-artifacts
+  - name: release
+    displayName: Publish Gitee Release
+    strategy: naturally
+    trigger: auto
+    steps:
+      - step: release@gitee
+        name: publish_gitee
+        displayName: Publish CarNat
+        tagName: ${CARNAT_RELEASE_TAG}
+        releaseName: CarNat ${CARNAT_RELEASE_TAG}
+        description: 'CarNat ${CARNAT_RELEASE_TAG} for Xiaomi. Download the signed APK below.'
+        upstreamArtifact:
+          - CARNAT_APK
+        assertFiles:
+          - release-artifacts/CarNat-Xiaomi-${CARNAT_RELEASE_TAG}.apk
+        prerelease: false
+        allowUpdate: false
