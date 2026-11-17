@@ -19,9 +19,7 @@ import java.net.UnknownHostException
 import androidx.annotation.RequiresApi
 import java.io.File
 import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -29,18 +27,26 @@ import kotlinx.coroutines.launch
 internal object ProjectionLog {
     private const val TAG = "CarNatLog"
     private val exportLock = Any()
-    private val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.ROOT)
     private val rtspCode = Regex("RTSP[^0-9]{0,12}([1-5][0-9]{2})")
     private val protocolOrigins = setOf(
         "Iap2LinkProbe", "MfiSap", "MfiTrust", "CarPlayPairing", "PairingTlv",
-        "CarPlayReceiverProbe", "CarPlayScreenProbe", "CarPlayDisplay", "CarPlayTouchEvents",
+        "CarPlayReceiverProbe", "CarPlayScreenProbe", "CarPlayDisplay", "CarPlayTouchEvents", "CarPlayPlist",
         "ReceiverWifi", "ReceiverWifiRequest", "RtspControl", "BluetoothReceiverProbe",
     )
-    private lateinit var files: RollingLogFiles
+    @Volatile private var buffer: ProjectionLogBuffer? = null
 
     @Suppress("DEPRECATION")
+    @Synchronized
     fun initialize(context: Context) {
-        files = RollingLogFiles(File(context.noBackupFilesDir, "projection-logs"))
+        if (buffer != null) return
+        val log = ProjectionLogBuffer(
+            RollingLogFiles(File(context.noBackupFilesDir, "projection-logs")),
+            Executors.newSingleThreadExecutor { task ->
+                Thread(task, "CarNat log writer").apply { isDaemon = true }
+            },
+            onWriteFailure = { Log.w(TAG, "Could not write projection log", it) },
+        )
+        buffer = log
         val prefs = context.getSharedPreferences("log_process", Context.MODE_PRIVATE)
         val previousPid = prefs.getInt("pid", 0)
         val previousStart = prefs.getLong("started", 0)
@@ -50,7 +56,9 @@ internal object ProjectionLog {
         val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             try {
-                failure("未捕获异常", error)
+                val entry = describeFailure("未捕获异常", error)
+                Log.e(TAG, entry.take(2_000))
+                log.tryWriteCrash(entry)
             } finally {
                 previousHandler?.uncaughtException(thread, error)
             }
@@ -85,9 +93,11 @@ internal object ProjectionLog {
         event(entry)
     }
 
-    fun failure(stage: String, error: Throwable) {
-        event(buildString {
-            append(stage)
+    fun failure(stage: String, error: Throwable) = event(describeFailure(stage, error))
+
+    private fun describeFailure(stage: String, error: Throwable): String =
+        buildString {
+            append(stage.take(2_000))
             var current: Throwable? = error
             repeat(4) { depth ->
                 val cause = current ?: return@repeat
@@ -97,17 +107,16 @@ internal object ProjectionLog {
                 cause.stackTrace.take(if (depth == 0) 8 else 3).forEach { append("\n  at ").append(it) }
                 current = cause.cause?.takeUnless { it === cause }
             }
-        })
-    }
+        }
 
     private fun failureReason(error: Throwable): String? {
-        val message = error.message.orEmpty()
+        val message = error.message.orEmpty().take(250)
         val origin = error.stackTrace.firstOrNull()?.className.orEmpty()
         val prefix = "com.baidu.carlife.xiaomi.carplay."
         // These local protocol errors are built from fixed text, protocol field names and numeric codes.
         if (origin.startsWith(prefix) && origin.removePrefix(prefix).substringBefore('$') in protocolOrigins &&
             (error is ProtocolException || error is EOFException || error.javaClass == IOException::class.java)
-        ) return message.take(250)
+        ) return message
         return when (error) {
             is SocketTimeoutException -> "套接字等待超时"
             is ConnectException -> "无法建立 TCP 连接"
@@ -123,16 +132,11 @@ internal object ProjectionLog {
         }
     }
 
-    @Synchronized
     fun event(message: String) {
-        if (!::files.isInitialized) return
-        runCatching {
-            files.append("${timestamp.format(Date())} ${message.take(2_000)}\n")
-        }.onFailure { Log.w(TAG, "Could not write projection log", it) }
+        buffer?.enqueue(message)
     }
 
-    @Synchronized
-    fun snapshot(): String = if (::files.isInitialized) files.snapshot() else ""
+    fun snapshot(): String = buffer?.snapshot().orEmpty()
 
     @RequiresApi(30)
     private fun collectExit(context: Context, pid: Int, started: Long, expectedRestartAt: Long) {
@@ -183,7 +187,10 @@ internal object ProjectionLog {
                 it.write("CarNat · Android API ${Build.VERSION.SDK_INT}\n")
                 it.write(snapshot())
             }
-            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            val published = resolver.update(
+                uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null,
+            )
+            if (published == 0) throw IOException("无法发布导出的日志文件")
         } catch (failure: Exception) {
             runCatching { resolver.delete(uri, null, null) }
             throw failure

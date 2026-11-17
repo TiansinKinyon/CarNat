@@ -28,4 +28,18 @@ class RollingLogFilesTest {
         assertEquals("日志日志", files.snapshot())
         assertTrue(temp.root.listFiles().orEmpty().all { it.length() == 6L })
     }
+
+    @Test
+    fun readsOnlyCompleteRecentLinesFromAnOversizedFile() {
+        temp.newFile("CarNat-0.log").writeText("旧".repeat(100) + "\n最近\n")
+        val files = RollingLogFiles(temp.root, fileLimit = 10)
+        assertEquals("最近\n", files.snapshot())
+    }
+
+    @Test
+    fun preservesTheFirstLineWhenTheTailStartsOnALineBoundary() {
+        temp.newFile("CarNat-0.log").writeText("旧\n最近\n")
+        val files = RollingLogFiles(temp.root, fileLimit = 7)
+        assertEquals("最近\n", files.snapshot())
+    }
 }

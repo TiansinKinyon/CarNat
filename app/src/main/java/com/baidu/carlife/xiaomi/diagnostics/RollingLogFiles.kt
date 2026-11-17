@@ -2,13 +2,18 @@ package com.baidu.carlife.xiaomi.diagnostics
 
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 
-/** Access is serialized by ProjectionLog. */
+/** File access is serialized by ProjectionLogBuffer. */
 internal class RollingLogFiles(
     private val directory: File,
     private val fileLimit: Int = 128 * 1024,
     private val fileCount: Int = 3,
 ) {
+    init {
+        require(fileLimit > 0 && fileCount > 0)
+    }
+
     fun append(entry: String) {
         val bytes = entry.toByteArray()
         require(bytes.size <= fileLimit)
@@ -29,7 +34,25 @@ internal class RollingLogFiles(
 
     fun snapshot(): String = (fileCount - 1 downTo 0).joinToString("") { index ->
         val log = file(index)
-        if (log.isFile) log.readText() else ""
+        if (log.isFile) readTail(log) else ""
+    }
+
+    private fun readTail(log: File): String = RandomAccessFile(log, "r").use { input ->
+        val length = input.length()
+        val size = minOf(length, fileLimit.toLong()).toInt()
+        val start = length - size
+        input.seek(start)
+        val bytes = ByteArray(size).also(input::readFully)
+        val firstLine = if (start == 0L) {
+            0
+        } else {
+            input.seek(start - 1)
+            if (input.read() == '\n'.code) 0 else {
+                val newline = bytes.indexOf('\n'.code.toByte())
+                if (newline < 0) size else newline + 1
+            }
+        }
+        bytes.decodeToString(firstLine)
     }
 
     private fun file(index: Int) = File(directory, "CarNat-$index.log")
