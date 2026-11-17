@@ -27,9 +27,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
+import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,14 +41,25 @@ import kotlinx.coroutines.withContext
 internal fun ProjectionLogScreen(active: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var recent by remember { mutableStateOf("") }
+    val isPreview = LocalInspectionMode.current
+    var recent by remember {
+        mutableStateOf(
+            if (isPreview) {
+                "14:28:01 · 已收到 CarPlay 网络端点\n" +
+                    "14:28:03 · 主屏视频 TCP 已连接，RECORD 已确认\n" +
+                    "14:28:04 · 正在投屏 · 已发送 CarWith 首个视频关键帧"
+            } else {
+                ""
+            },
+        )
+    }
     var refresh by remember { mutableStateOf(0) }
     var exporting by remember { mutableStateOf(false) }
     var exported by remember { mutableStateOf<Uri?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(active, refresh) {
-        if (!active) return@LaunchedEffect
+        if (!active || isPreview) return@LaunchedEffect
         val snapshot = withContext(Dispatchers.IO) { runCatching { ProjectionLog.snapshot() } }
         snapshot.onSuccess { recent = it.lines().takeLast(81).joinToString("\n").trimEnd() }
             .onFailure { error = "无法读取投屏日志" }
@@ -61,7 +75,7 @@ internal fun ProjectionLogScreen(active: Boolean) {
             Button(
                 enabled = active && !exporting && Build.VERSION.SDK_INT >= 29,
                 onClick = {
-                    if (Build.VERSION.SDK_INT >= 29) {
+                    if (!isPreview && Build.VERSION.SDK_INT >= 29) {
                         exporting = true
                         error = null
                         scope.launch {
@@ -108,5 +122,13 @@ internal fun ProjectionLogScreen(active: Boolean) {
                 )
             }
         }
+    }
+}
+
+@Preview(showBackground = true, widthDp = 360)
+@Composable
+private fun ProjectionLogPreview() {
+    CarNatTheme(dynamicColor = false) {
+        ProjectionLogScreen(active = true)
     }
 }
