@@ -73,6 +73,8 @@ import com.baidu.carlife.service.ReceiverConnection
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
+import com.baidu.carlife.xiaomi.carplay.ProjectionLinkStatus
+import com.baidu.carlife.xiaomi.carplay.connectionStatus
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 import java.util.Locale
@@ -217,42 +219,7 @@ private fun ProjectionContent(
     var addressRequired by rememberSaveable { mutableStateOf(false) }
     var showAddressHelp by rememberSaveable { mutableStateOf(false) }
     val addressError = !validAddress && (phoneAddress.isNotEmpty() || manual && addressRequired)
-    val connectionError = error ?: status.error
-    val showError = supported && (
-        connectionError != null || status.phase == CapturePhase.FAILED ||
-            status.receiverConnection == ReceiverConnection.FAILED
-        )
-    val showSuccess = supported && !showError && status.active &&
-        status.receiverConnection == ReceiverConnection.CONNECTED
-    val carWithLink = when {
-        supported && status.phase == CapturePhase.RECEIVING -> ProjectionLinkStatus.CONNECTED
-        showError -> ProjectionLinkStatus.FAILED
-        !supported -> ProjectionLinkStatus.PENDING
-        else -> when (status.phase) {
-            CapturePhase.ARMED, CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES ->
-                ProjectionLinkStatus.CONNECTING
-            else -> ProjectionLinkStatus.PENDING
-        }
-    }
-    val receiverLink = when {
-        showError -> ProjectionLinkStatus.FAILED
-        showSuccess -> ProjectionLinkStatus.CONNECTED
-        supported && status.active -> ProjectionLinkStatus.CONNECTING
-        else -> ProjectionLinkStatus.PENDING
-    }
-    val message = when {
-        !supported -> "CarPlay 投屏需要 Android 13 或更新版本"
-        showSuccess -> "连接成功"
-        else -> connectionError ?: status.receiverStatus ?: when (status.phase) {
-            CapturePhase.WAITING_FOR_RECEIVER -> "正在等待车载 CarPlay 连接"
-            CapturePhase.READY_TO_START_CAR_WITH -> "车机连接成功，返回 CarNat 即可启动 CarWith"
-            CapturePhase.ARMED -> "正在启动 CarWith"
-            CapturePhase.BINDING, CapturePhase.WAITING_FOR_FRAMES -> "正在准备 CarWith 画面"
-            CapturePhase.RECEIVING -> "正在投屏"
-            CapturePhase.STOPPED -> "投屏已停止"
-            else -> "等待连接"
-        }
-    }
+    val (carWithLink, receiverLink, message) = status.connectionStatus(supported, error)
     Box(modifier.fillMaxSize()) {
         Column(
             modifier = Modifier.fillMaxSize()
@@ -442,13 +409,6 @@ private fun ProjectionStatusMessage(message: String, status: ProjectionLinkStatu
             Text(message, style = MaterialTheme.typography.bodyMedium)
         }
     }
-}
-
-private enum class ProjectionLinkStatus(@get:DrawableRes val icon: Int, val description: String) {
-    PENDING(R.drawable.ic_more_horiz, "未连接"),
-    CONNECTING(R.drawable.ic_more_horiz, "正在连接"),
-    CONNECTED(R.drawable.ic_check_circle, "已连接"),
-    FAILED(R.drawable.ic_error, "连接失败"),
 }
 
 @Composable

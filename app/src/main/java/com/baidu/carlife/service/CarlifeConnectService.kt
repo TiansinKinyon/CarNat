@@ -1,6 +1,5 @@
 package com.baidu.carlife.service
 
-import android.Manifest
 import android.app.Service
 import android.bluetooth.BluetoothManager
 import android.app.Notification
@@ -11,7 +10,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.Icon
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -30,7 +30,6 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
-import androidx.core.app.NotificationCompat
 import com.baidu.carlife.mixing.CastConfig
 import com.baidu.carlife.mixing.MusicInfo
 import com.baidu.carlife.mixing.aidl.ICarLifeCastCallback
@@ -51,9 +50,12 @@ import java.nio.ByteBuffer
 import java.util.UUID
 import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
 import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
+import com.baidu.carlife.xiaomi.carplay.ProjectionConnectionStatus
+import com.baidu.carlife.xiaomi.carplay.ProjectionLinkStatus
 import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
+import com.baidu.carlife.xiaomi.carplay.connectionStatus
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -72,6 +74,7 @@ class CarlifeConnectService : Service() {
     private val projectionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var receiverProbe: BluetoothReceiverProbe? = null
     private var receiverJob: Job? = null
+    private var lastNotificationStatus: ProjectionConnectionStatus? = null
     private var stopping = false
 
     @android.annotation.SuppressLint("MissingPermission")
@@ -114,23 +117,19 @@ class CarlifeConnectService : Service() {
                             timeout.cancel()
                             projectionScope.launch {
                                 if (receiverProbe === probe) {
-                                    dismissConnectingNotification()
                                     mutableState.update { it.copy(receiverConnection = ReceiverConnection.CONNECTED) }
-                                    startForeground(
-                                        NOTIFICATION_ID,
-                                        projectionNotification("CarNat 连接成功", "正在投屏到车机"),
-                                    )
                                 }
                             }
                         },
                         onReconnecting = {
                             projectionScope.launch {
                                 if (receiverProbe === probe) {
-                                    mutableState.update { it.copy(receiverConnection = ReceiverConnection.PENDING) }
-                                    startForeground(
-                                        NOTIFICATION_ID,
-                                        projectionNotification("CarNat 正在重连", "正在等待车机重新连接"),
-                                    )
+                                    mutableState.update {
+                                        it.copy(
+                                            receiverConnection = ReceiverConnection.PENDING,
+                                            receiverStatus = "正在等待车机重新连接",
+                                        )
+                                    }
                                 }
                             }
                         },
@@ -188,7 +187,6 @@ class CarlifeConnectService : Service() {
                 timeout.cancel()
                 if (receiverProbe === probe) {
                     receiverProbe = null
-                    dismissConnectingNotification()
                     if (streamed && !fromCarWith) {
                         mutableState.update {
                             it.copy(
@@ -196,10 +194,6 @@ class CarlifeConnectService : Service() {
                                 receiverStatus = terminalError ?: "投屏连接已断开",
                             )
                         }
-                        startForeground(
-                            NOTIFICATION_ID,
-                            projectionNotification("CarNat 连接已断开", "点按返回 CarNat"),
-                        )
                     }
                     mutableReceiverDiagnostics.value = ReceiverDiagnostics()
                     probedResolution?.let(::prepareCarWithLaunch)
@@ -211,7 +205,6 @@ class CarlifeConnectService : Service() {
 
     private fun stopReceiver() {
         mutableState.update { it.copy(receiverConnection = ReceiverConnection.PENDING) }
-        dismissConnectingNotification()
         receiverProbe?.close()
         receiverProbe = null
         launchResolution = null
@@ -237,6 +230,26 @@ class CarlifeConnectService : Service() {
         super.onCreate()
         thread = HandlerThread("CarWith capture").apply { start() }
         worker = Handler(thread.looper)
+        projectionScope.launch {
+            state.collect { capture ->
+                val previous = lastNotificationStatus ?: return@collect
+                if (stopping || !capture.active) return@collect
+                if (capture.connectionStatus() == previous) return@collect
+                // Fast handshake stages can hit Android's notification enqueue rate limit.
+                delay(NOTIFICATION_UPDATE_INTERVAL_MS)
+                val latest = state.value
+                if (stopping || !latest.active || lastNotificationStatus == null) return@collect
+                val status = latest.connectionStatus()
+                if (status == lastNotificationStatus) return@collect
+                try {
+                    getSystemService(NotificationManager::class.java)
+                        .notify(NOTIFICATION_ID, projectionNotification(status))
+                    lastNotificationStatus = status
+                } catch (error: RuntimeException) {
+                    Log.w(TAG, "Unable to update the projection notification", error)
+                }
+            }
+        }
     }
 
     override fun onBind(intent: Intent): IBinder = entryBinder
@@ -262,7 +275,10 @@ class CarlifeConnectService : Service() {
                     mutableState.update {
                         it.copy(phase = CapturePhase.STOPPED, receiverStatus = null, receiverDisplayChanged = false)
                     }
-                    if (stopSelfResult(startId)) stopForeground(STOP_FOREGROUND_REMOVE)
+                    if (stopSelfResult(startId)) {
+                        lastNotificationStatus = null
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                    }
                 }
             }
             return START_NOT_STICKY
@@ -270,9 +286,9 @@ class CarlifeConnectService : Service() {
         if (intent?.action == diagnosticToken) {
             if (!stopping && !mutableState.value.active) {
                 clearLaunchTicket(this)
-                startForeground(NOTIFICATION_ID, projectionNotification())
                 ProjectionLog.event("用户开始投屏")
                 mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
+                startProjectionForeground()
                 val capture = CaptureSession()
                 worker.post { session = capture }
                 val manualMode = ProjectionPreferences.load(this).manualDisplayMode
@@ -302,10 +318,9 @@ class CarlifeConnectService : Service() {
         if (carWithRequest && connectionType == 0 && !phase.isActive && !stopping &&
             Build.VERSION.SDK_INT >= 33 && ConnectionMode.load(this) == ConnectionMode.CAR_WITH
         ) {
-            startForeground(NOTIFICATION_ID, projectionNotification())
-            showConnectingNotification()
             ProjectionLog.event("CarWith 发起车辆热点连接")
             mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER, connectionType = connectionType)
+            startProjectionForeground()
             val capture = CaptureSession(videoBitrateKbps = ProjectionPreferences.load(this).videoBitrateKbps)
             worker.post { session = capture }
             startReceiver(capture, fromCarWith = true)
@@ -315,14 +330,13 @@ class CarlifeConnectService : Service() {
             consumeLaunchTicket(this)
         } else null
         if (intent != null && resolution != null) {
-            startForeground(NOTIFICATION_ID, projectionNotification())
+            startProjectionForeground()
             ProjectionLog.event("CarWith 启动组件 · usb_type=$connectionType")
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
-            showConnectingNotification()
             beginCapture(connectionType, resolution)
         } else if (!mutableState.value.active) {
             // Even a declined external start must satisfy startForegroundService's contract.
-            startForeground(NOTIFICATION_ID, projectionNotification())
+            startProjectionForeground()
             stopSelfResult(startId)
         }
         return START_NOT_STICKY
@@ -382,64 +396,88 @@ class CarlifeConnectService : Service() {
         super.onDestroy()
     }
 
-    private fun showConnectingNotification() {
-        val notifications = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) {
-            notifications.createNotificationChannel(
-                NotificationChannel(CONNECTING_CHANNEL_ID, "连接提醒", NotificationManager.IMPORTANCE_HIGH),
-            )
-        }
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) return
-        if (!notifications.areNotificationsEnabled()) return
-
-        val notification = NotificationCompat.Builder(this, CONNECTING_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_cast)
-            .setContentTitle("CarNat 正在连接")
-            .setContentText("正在连接车机并准备 CarWith 投屏画面")
-            .setContentIntent(openCarNatIntent())
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_SOUND)
-            .setOnlyAlertOnce(true)
-            .setTimeoutAfter(RECEIVER_CONNECT_TIMEOUT_MS)
-            .build()
-        try {
-            notifications.notify(CONNECTING_NOTIFICATION_ID, notification)
-        } catch (_: SecurityException) {
-            // Notification access can be revoked between the permission check and posting.
-        }
+    private fun startProjectionForeground() {
+        val status = state.value.connectionStatus()
+        startForeground(NOTIFICATION_ID, projectionNotification(status))
+        lastNotificationStatus = status
     }
-
-    private fun dismissConnectingNotification() {
-        getSystemService(NotificationManager::class.java).cancel(CONNECTING_NOTIFICATION_ID)
-    }
-
-    private fun openCarNatIntent(): PendingIntent = PendingIntent.getActivity(
-        this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
-    )
 
     @Suppress("DEPRECATION")
-    private fun projectionNotification(
-        title: String = "CarNat 正在连接",
-        message: String = "正在准备 CarPlay 投屏",
-    ): Notification {
-        val builder = if (Build.VERSION.SDK_INT >= 26) {
+    private fun projectionNotification(status: ProjectionConnectionStatus): Notification {
+        if (Build.VERSION.SDK_INT >= 26) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "CarWith 投屏诊断", NotificationManager.IMPORTANCE_LOW),
             )
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            Notification.Builder(this)
         }
-        return builder.setSmallIcon(R.drawable.ic_cast)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setContentIntent(openCarNatIntent())
-            .setOnlyAlertOnce(true)
-            .setOngoing(true)
-            .build()
+        val openCarNat = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+        )
+        val completed = listOf(status.carWithLink, status.receiverLink)
+            .count { it == ProjectionLinkStatus.CONNECTED }
+        val progress = completed * 50
+        val title = when (status.receiverLink) {
+            ProjectionLinkStatus.CONNECTED -> "已连接"
+            ProjectionLinkStatus.CONNECTING -> "连接中"
+            ProjectionLinkStatus.FAILED -> "连接失败"
+            ProjectionLinkStatus.PENDING -> "等待连接"
+        }
+        fun baseBuilder(): Notification.Builder {
+            val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID)
+                else Notification.Builder(this)
+            return builder.setSmallIcon(R.drawable.ic_cast)
+                .setContentTitle(title)
+                .setContentText(status.message)
+                .setContentIntent(openCarNat)
+                .setCategory(Notification.CATEGORY_PROGRESS)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setOnlyAlertOnce(true)
+                .setOngoing(true)
+                .setShowWhen(false)
+        }
+        if (Build.VERSION.SDK_INT >= 36) {
+            try {
+                val darkMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                    Configuration.UI_MODE_NIGHT_YES
+                val iconColor = getColor(
+                    if (darkMode) android.R.color.system_neutral1_100 else android.R.color.system_neutral1_800,
+                )
+                val accent = getColor(
+                    if (darkMode) android.R.color.system_accent1_200 else android.R.color.system_accent1_700,
+                )
+                val connecting = getColor(android.R.color.system_accent1_400)
+                val inactive = getColor(
+                    if (darkMode) android.R.color.system_neutral1_700 else android.R.color.system_neutral1_300,
+                )
+                fun linkColor(link: ProjectionLinkStatus) = when (link) {
+                    ProjectionLinkStatus.CONNECTED -> accent
+                    ProjectionLinkStatus.CONNECTING -> connecting
+                    ProjectionLinkStatus.PENDING, ProjectionLinkStatus.FAILED -> inactive
+                }
+
+                fun progressIcon(resource: Int) = Icon.createWithResource(this, resource).setTint(iconColor)
+
+                // Some Android 16 builds lack the builder method but accept the notification extra.
+                return baseBuilder()
+                    .setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+                    .addExtras(Bundle().apply { putBoolean(Notification.EXTRA_REQUEST_PROMOTED_ONGOING, true) })
+                    .setStyle(
+                        Notification.ProgressStyle()
+                            .addProgressSegment(Notification.ProgressStyle.Segment(50).setColor(linkColor(status.carWithLink)))
+                            .addProgressSegment(Notification.ProgressStyle.Segment(50).setColor(linkColor(status.receiverLink)))
+                            .addProgressPoint(Notification.ProgressStyle.Point(50).setColor(accent))
+                            .setStyledByProgress(false)
+                            .setProgress(progress)
+                            .setProgressStartIcon(progressIcon(R.drawable.ic_mobile_cast))
+                            .setProgressEndIcon(progressIcon(R.drawable.ic_car_gear)),
+                    )
+                    .build()
+            } catch (error: LinkageError) {
+                Log.w(TAG, "Live update notification API is unavailable", error)
+            } catch (error: RuntimeException) {
+                Log.w(TAG, "Unable to build a live update notification", error)
+            }
+        }
+        return baseBuilder().setProgress(100, progress, false).build()
     }
 
     private inner class CaptureSession(
@@ -882,8 +920,7 @@ class CarlifeConnectService : Service() {
         private const val TAG = "CarNatCapture"
         private const val CHANNEL_ID = "carwith_diagnostics"
         private const val NOTIFICATION_ID = 1
-        private const val CONNECTING_CHANNEL_ID = "carplay_connecting"
-        private const val CONNECTING_NOTIFICATION_ID = 2
+        private const val NOTIFICATION_UPDATE_INTERVAL_MS = 500L
         private const val RECEIVER_CONNECT_TIMEOUT_MS = 100_000L
         private const val CAR_WITH_START_TIMEOUT_MS = 90_000L
         // CarWith force-stops the CarLife component before starting its service.
