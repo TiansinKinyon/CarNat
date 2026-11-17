@@ -6,8 +6,8 @@ import java.security.MessageDigest
 import java.util.Locale
 
 internal enum class ConnectionMode(val label: String, val summary: String) {
-    MANUAL("CarNat 接管", "在 CarNat 选择已配对的车机并开始投屏"),
-    CAR_WITH("CarWith 发起", "通过 CarWith 的车辆热点连接，使用其已保存的连接记录自动启动");
+    CAR_WITH("CarWith 发起", "通过 CarWith 的车辆热点连接，使用其已保存的连接记录自动启动"),
+    MANUAL("CarNat 接管", "在 CarNat 选择已配对的车机并开始投屏");
 
     fun save(context: Context) = preferences(context).edit().putString("mode", name).apply()
 
@@ -17,7 +17,7 @@ internal enum class ConnectionMode(val label: String, val summary: String) {
 
         fun load(context: Context): ConnectionMode {
             val saved = preferences(context).getString("mode", null)
-            return entries.firstOrNull { it.name == saved } ?: MANUAL
+            return entries.firstOrNull { it.name == saved } ?: CAR_WITH
         }
 
         /** Stable per-install identity for receivers that do not require the hardware address. */
