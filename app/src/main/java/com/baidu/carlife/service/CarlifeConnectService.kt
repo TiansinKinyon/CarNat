@@ -512,26 +512,82 @@ class CarlifeConnectService : Service() {
         }
         private var avcConfiguration: ByteArray? = null
         private var inspectedKeyFrame = false
-        private val requestSyncFrame: () -> Unit = {
-            worker.post {
-                if (!closed) {
+        private var lastSyncRequest = -1_000L
+        private val syncRequestPending = java.util.concurrent.atomic.AtomicBoolean()
+        private val sendSyncRequest = Runnable {
+            try {
+                val now = SystemClock.uptimeMillis()
+                if (!closed && now - lastSyncRequest >= 250) {
+                    lastSyncRequest = now
                     try {
                         codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
                     } catch (error: IllegalStateException) {
                         Log.w(TAG, "Encoder sync request failed", error)
                     }
                 }
+            } finally {
+                syncRequestPending.set(false)
+            }
+        }
+        private val requestSyncFrame: () -> Unit = {
+            if (syncRequestPending.compareAndSet(false, true) && !worker.post(sendSyncRequest)) {
+                syncRequestPending.set(false)
             }
         }
         private var touchListener: IRemoteTouchListener? = null
         private var touchDownTime: Long? = null
         private var keyListener: IRemoteKeyListener? = null
         private val contacts = mutableListOf<RemoteContact>()
+        private val pendingInputs = ArrayDeque<() -> Unit>()
+        private var acceptingInput = true
+        private var inputDrainScheduled = false
+        private var remoteFingersDown = false
+        private var waitForTouchRelease = false
+        private val cancelTouch: () -> Unit = { sendTouch(emptyList(), cancel = true) }
+        private val drainInput = object : Runnable {
+            override fun run() {
+                val input = synchronized(pendingInputs) { pendingInputs.removeFirstOrNull() }
+                try {
+                    if (!closed) input?.invoke()
+                } finally {
+                    synchronized(pendingInputs) {
+                        inputDrainScheduled = pendingInputs.isNotEmpty() && worker.post(this)
+                        if (!inputDrainScheduled) pendingInputs.clear()
+                    }
+                }
+            }
+        }
+
+        private fun enqueueInput(cancel: Boolean = false, input: () -> Unit) {
+            synchronized(pendingInputs) {
+                if (!acceptingInput) return
+                if (cancel || pendingInputs.size >= MAX_PENDING_INPUTS) {
+                    // Drop stale input and release any fingers already delivered to CarWith.
+                    pendingInputs.clear()
+                    pendingInputs.addLast(cancelTouch)
+                    waitForTouchRelease = !cancel && remoteFingersDown
+                } else {
+                    pendingInputs.addLast(input)
+                }
+                if (!inputDrainScheduled) {
+                    inputDrainScheduled = worker.post(drainInput)
+                    if (!inputDrainScheduled) pendingInputs.clear()
+                }
+            }
+        }
+
         private val touchSink: (List<RemoteContact>, Boolean) -> Unit = { report, cancel ->
-            worker.post { sendTouch(report, cancel) }
+            synchronized(pendingInputs) {
+                remoteFingersDown = !cancel && report.any { it.down }
+                if (cancel || !waitForTouchRelease) {
+                    enqueueInput(cancel) { sendTouch(report, cancel = false) }
+                } else if (!remoteFingersDown) {
+                    waitForTouchRelease = false
+                }
+            }
         }
         private val keySink: (Int) -> Unit = { code ->
-            worker.post {
+            enqueueInput {
                 val listener = keyListener
                 if (!closed && listener != null) {
                     val now = SystemClock.uptimeMillis()
@@ -826,6 +882,10 @@ class CarlifeConnectService : Service() {
             val keyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
 
             val data = codec.getOutputBuffer(index)?.duplicate() ?: return
+            if (info.offset < 0 || info.offset > data.capacity() || info.size > data.capacity() - info.offset) {
+                Log.w(TAG, "Invalid AVC output buffer range")
+                return
+            }
             data.limit(info.offset + info.size)
             data.position(info.offset)
             if (configBuffer) {
@@ -885,6 +945,12 @@ class CarlifeConnectService : Service() {
             closed = true
             if (remoteTouchSink === touchSink) remoteTouchSink = null
             if (keyFrameSink === requestSyncFrame) keyFrameSink = null
+            synchronized(pendingInputs) {
+                acceptingInput = false
+                pendingInputs.clear()
+                worker.removeCallbacks(drainInput)
+            }
+            worker.removeCallbacks(sendSyncRequest)
             touchListener = null
             if (remoteKeySink === keySink) remoteKeySink = null
             keyListener = null
@@ -910,6 +976,7 @@ class CarlifeConnectService : Service() {
     }
 
     companion object {
+        private const val MAX_PENDING_INPUTS = 32
         private val CAR_WITH_SERVICE = ComponentName(
             "com.miui.carlink",
             "com.xiaomi.ucar.carlife.CarlifeConnService",

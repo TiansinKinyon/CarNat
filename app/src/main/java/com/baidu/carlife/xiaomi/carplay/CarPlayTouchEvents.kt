@@ -4,7 +4,6 @@ import android.util.Log
 import android.view.KeyEvent
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.service.RemoteContact
-import com.dd.plist.BinaryPropertyListParser
 import com.dd.plist.BinaryPropertyListWriter
 import com.dd.plist.NSData
 import com.dd.plist.NSDictionary
@@ -33,6 +32,10 @@ internal class CarPlayTouchEvents(
     private var knobButtons = 0
 
     fun start() {
+        synchronized(inputOwnerLock) {
+            if (inputOwner != null) CarlifeConnectService.remoteTouch(emptyList(), cancel = true)
+            inputOwner = this
+        }
         Thread({
             try {
                 receive()
@@ -40,7 +43,12 @@ internal class CarPlayTouchEvents(
             } catch (error: Exception) {
                 if (!socket.isClosed) Log.w("CarNatTouch", "Event channel ended", error)
             } finally {
-                if (contacts.any { it.down }) CarlifeConnectService.remoteTouch(emptyList(), cancel = true)
+                synchronized(inputOwnerLock) {
+                    if (inputOwner === this) {
+                        inputOwner = null
+                        CarlifeConnectService.remoteTouch(emptyList(), cancel = true)
+                    }
+                }
                 onClosed()
             }
         }, "CarPlay events").apply { isDaemon = true }.start()
@@ -101,17 +109,21 @@ internal class CarPlayTouchEvents(
             if (start.startsWith("RTSP/1.0 ")) continue
             val seq = fields["cseq"]?.toIntOrNull() ?: throw ProtocolException("Missing event CSeq")
             if (start == "POST /command RTSP/1.0" && body.isNotEmpty()) {
-                val command = BinaryPropertyListParser.parse(body) as? NSDictionary
-                val type = (command?.objectForKey("type") as? NSString)?.content
-                val uuid = (command?.objectForKey("uuid") as? NSString)?.content
+                val command = CarPlayPlist.readDictionary(body)
+                val type = (command.objectForKey("type") as? NSString)?.content
+                val uuid = (command.objectForKey("uuid") as? NSString)?.content
                 if (type == "hidSendReport" && uuid.equals("2a2a2a2a", ignoreCase = true) && width > 0 && height > 0) {
-                    (command?.objectForKey("hidReport") as? NSData)?.bytes()?.let(::touch)
+                    (command.objectForKey("hidReport") as? NSData)?.bytes()?.let { report ->
+                        dispatchInput { touch(report) }
+                    }
                 } else if (type == "hidSendReport" && uuid.equals("2a2a2a2b", ignoreCase = true)) {
-                    (command?.objectForKey("hidReport") as? NSData)?.bytes()?.let(::knob)
+                    (command.objectForKey("hidReport") as? NSData)?.bytes()?.let { report ->
+                        dispatchInput { knob(report) }
+                    }
                 } else if (type == "forceKeyFrame") {
-                    CarlifeConnectService.requestKeyFrame()
+                    dispatchInput { CarlifeConnectService.requestKeyFrame() }
                 } else if (type == "iAPSendMessage") {
-                    val params = command?.objectForKey("params") as? NSDictionary
+                    val params = command.objectForKey("params") as? NSDictionary
                     (params?.objectForKey("data") as? NSData)?.bytes()?.let(iap::write)
                     iap.flush()
                 }
@@ -120,6 +132,12 @@ internal class CarPlayTouchEvents(
                 output.write("RTSP/1.0 200 OK\r\nCSeq: $seq\r\nContent-Length: 0\r\n\r\n".toByteArray(Charsets.US_ASCII))
                 output.flush()
             }
+        }
+    }
+
+    private inline fun dispatchInput(dispatch: () -> Unit) {
+        synchronized(inputOwnerLock) {
+            if (inputOwner === this && !socket.isClosed) dispatch()
         }
     }
 
@@ -171,5 +189,10 @@ internal class CarPlayTouchEvents(
             }
         }
         throw ProtocolException("Event line too long")
+    }
+
+    private companion object {
+        val inputOwnerLock = Any()
+        var inputOwner: CarPlayTouchEvents? = null
     }
 }

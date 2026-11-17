@@ -26,6 +26,7 @@ internal object CarWithVideoFeed {
 
     class Subscription {
         private val frames = ArrayBlockingQueue<Frame>(8)
+        private val queuedBytes = java.util.concurrent.atomic.AtomicInteger()
         private var needsKeyFrame = true
         private val encoded = java.util.concurrent.atomic.AtomicLong()
         private val discarded = java.util.concurrent.atomic.AtomicLong()
@@ -39,30 +40,56 @@ internal object CarWithVideoFeed {
                 discarded.incrementAndGet()
                 return
             }
-            if (frames.remainingCapacity() == 0) {
-                discarded.addAndGet(frames.size.toLong())
-                frames.clear()
-                needsKeyFrame = true
-                if (!keyFrame) return
+            if (config.size !in 1..AvcPayload.MAX_CONFIGURATION_BYTES ||
+                (frames.remainingCapacity() == 0 && !keyFrame)
+            ) {
+                discardPending()
+                discarded.incrementAndGet()
+                return
             }
             val payload = try {
                 AvcPayload.accessUnit(data)
             } catch (_: IllegalArgumentException) {
-                discarded.addAndGet(frames.size.toLong())
-                frames.clear()
-                needsKeyFrame = true
+                discardPending()
+                discarded.incrementAndGet()
                 return
+            }
+            if (frames.remainingCapacity() == 0 ||
+                queuedBytes.get() + payload.size + config.size > MAX_QUEUED_BYTES
+            ) {
+                discardPending()
+                if (!keyFrame) {
+                    discarded.incrementAndGet()
+                    return
+                }
             }
             val configuration = if (needsKeyFrame) config else null
             needsKeyFrame = false
-            frames.offer(Frame(payload, configuration, width, height, ptsUs))
+            val frame = Frame(payload, configuration, width, height, ptsUs)
+            queuedBytes.addAndGet(frame.size)
+            frames.add(frame)
         }
 
-        fun poll(timeoutMs: Long): Frame? = frames.poll(timeoutMs, TimeUnit.MILLISECONDS)
+        private fun discardPending() {
+            while (true) {
+                val frame = frames.poll() ?: break
+                queuedBytes.addAndGet(-frame.size)
+                discarded.incrementAndGet()
+            }
+            needsKeyFrame = true
+        }
+
+        fun poll(timeoutMs: Long): Frame? = frames.poll(timeoutMs, TimeUnit.MILLISECONDS)?.also {
+            queuedBytes.addAndGet(-it.size)
+        }
     }
 
     data class Frame(
         val payload: ByteArray, val configuration: ByteArray?,
         val width: Int, val height: Int, val ptsUs: Long,
-    )
+    ) {
+        val size get() = payload.size + (configuration?.size ?: 0)
+    }
+
+    private const val MAX_QUEUED_BYTES = 8 * 1024 * 1024
 }

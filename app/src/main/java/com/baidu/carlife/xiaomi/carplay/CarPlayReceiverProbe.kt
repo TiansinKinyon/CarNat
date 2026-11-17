@@ -1,7 +1,5 @@
 package com.baidu.carlife.xiaomi.carplay
 
-import com.dd.plist.BinaryPropertyListParser
-import com.dd.plist.NSDictionary
 import java.net.InetSocketAddress
 import java.net.ProtocolException
 import java.security.cert.X509Certificate
@@ -38,8 +36,7 @@ internal object CarPlayReceiverProbe {
                     if (deviceId.isEmpty()) return authenticated
                     onStage(authenticated)
                     if (readResolutionOnly) {
-                        val response = BinaryPropertyListParser.parse(info.body) as? NSDictionary
-                            ?: throw ProtocolException("接收端 /info 未返回有效的显示屏配置")
+                        val response = CarPlayPlist.readDictionary(info.body)
                         onResolution(CarPlayDisplay.fromReceiverInfo(response).resolution)
                         return "已读取车机主屏分辨率"
                     }
