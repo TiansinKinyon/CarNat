@@ -14,8 +14,8 @@ android {
         minSdk = 24
         targetSdk = 37
         // CarWith's USB setup requires a CarLife component version code of at least 220.
-        versionCode = 401
-        versionName = "1.3.0"
+        versionCode = 402
+        versionName = "1.3.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
