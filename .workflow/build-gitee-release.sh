@@ -55,6 +55,9 @@ sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 (set +o pipefail; yes | "$sdkmanager" --licenses >/dev/null)
 "$sdkmanager" 'platforms;android-37.0' 'build-tools;36.0.0'
 
+# Gitee's shared Gradle home injects an init.gradle that adds project repositories.
+# A fresh user home keeps the build's repository policy and toolchain settings intact.
+export GRADLE_USER_HOME="$work_dir/gradle-home"
 env -u ANDROID_KEYSTORE_BASE64 -u ANDROID_KEYSTORE_PASSWORD -u ANDROID_KEY_ALIAS -u ANDROID_KEY_PASSWORD \
   bash ./gradlew --no-daemon testDebugUnitTest assembleRelease
 
