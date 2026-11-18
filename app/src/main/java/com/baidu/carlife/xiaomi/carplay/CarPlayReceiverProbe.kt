@@ -19,7 +19,11 @@ internal object CarPlayReceiverProbe {
     ): String {
         sockets.open().use { socket ->
             onStage("正在连接接收端")
-            socket.connect(InetSocketAddress(sockets.resolve(host), port), 5_000)
+            val address = sockets.resolve(host)
+            if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isMulticastAddress) {
+                throw ProtocolException("CarPlay endpoint is not a remote unicast address")
+            }
+            socket.connect(InetSocketAddress(address, port), 5_000)
             socket.soTimeout = 8_000
             RtspControl(socket.getInputStream(), socket.getOutputStream(), socket).use { control ->
                 onStage("正在读取接收端信息")

@@ -10,6 +10,8 @@ import com.dd.plist.NSArray
 import com.dd.plist.NSDictionary
 import com.dd.plist.NSNumber
 import com.dd.plist.NSString
+import java.io.IOException
+import java.net.DatagramPacket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ProtocolException
@@ -51,6 +53,7 @@ internal object CarPlayScreenProbe {
         onStage("正在建立 CarPlay 会话")
         val session = NSDictionary().apply {
             put("timingPort", timing.port)
+            put("keepAliveLowPower", true)
             put("deviceID", deviceId.uppercase(Locale.ROOT))
             put("name", "CarNat")
             put("model", Build.MODEL)
@@ -60,7 +63,10 @@ internal object CarPlayScreenProbe {
             put("sessionUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
             put("sessionCorrelationUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
         }
-        val eventPort = port(parse(request(control, "SETUP", "/setup", session)), "eventPort")
+        val sessionReply = parse(request(control, "SETUP", "/setup", session))
+        val eventPort = port(sessionReply, "eventPort")
+        val keepAlivePort = (sessionReply.objectForKey("keepAlivePort") as? NSNumber)
+            ?.takeIf { it.isInteger }?.longValue()?.takeIf { it in 1L..65_535L }?.toInt()
         connect(sockets, host, eventPort).use { events ->
             CarPlayTouchEvents(
                 events, keys, control, resolution.width, resolution.height, certificate,
@@ -97,36 +103,55 @@ internal object CarPlayScreenProbe {
                             val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
                             if (!CarlifeConnectService.state.value.active) return connected
                             onStage(connected)
-                            val heartbeat = Thread({
-                                    try {
-                                        while (!video.isClosed) {
-                                            Thread.sleep(3_000)
-                                            val reply = control.request("OPTIONS", "*")
-                                            if (reply.status in 500..599) {
-                                                throw ProtocolException("CarPlay heartbeat returned ${reply.status}")
-                                            }
-                                        }
-                                    } catch (_: InterruptedException) {
-                                        Thread.currentThread().interrupt()
-                                    } catch (failure: java.io.IOException) {
-                                        if (!video.isClosed) {
-                                            android.util.Log.i("CarNatIap2", "CarPlay 控制通道失联：${failure.message}")
-                                            ProjectionLog.failure("CarPlay 控制通道心跳失败", failure)
-                                            sockets.close()
-                                        }
-                                    }
-                                }, "CarPlay connection heartbeat").apply { isDaemon = true; start() }
-                        try {
-                            return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
-                        } finally {
-                            heartbeat.interrupt()
-                        }
+                            val heartbeat = startHeartbeat(control, sockets, video, host, keepAlivePort)
+                            try {
+                                return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                            } finally {
+                                heartbeat.interrupt()
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    internal fun startHeartbeat(
+        control: RtspControl, sockets: CarPlaySockets, video: Socket, host: InetAddress, keepAlivePort: Int?,
+    ): Thread = Thread({
+        try {
+            val ping = keepAlivePort?.let { DatagramPacket(ByteArray(4), 4, host, it) }
+            val random = if (ping != null) SecureRandom() else null
+            val interval = if (ping != null) 1_000L else 3_000L
+            (ping?.let { sockets.openDatagram() }).use { udp ->
+                var nextPing = System.nanoTime()
+                var feedback = ping != null
+                if (!feedback) Thread.sleep(interval)
+                while (!video.isClosed && !Thread.currentThread().isInterrupted) {
+                    val now = System.nanoTime()
+                    if (udp != null && ping != null && random != null && now - nextPing >= 0L) {
+                        random.nextBytes(ping.data)
+                        udp.send(ping)
+                        nextPing = now + 5_000_000_000L
+                    }
+                    val reply = if (feedback) control.request("POST", "/feedback") else control.request("OPTIONS", "*")
+                    if (feedback && (reply.status == 404 || reply.status == 405 || reply.status == 501)) {
+                        feedback = false
+                    } else if (reply.status in 500..599) {
+                        throw ProtocolException("CarPlay heartbeat returned ${reply.status}")
+                    }
+                    Thread.sleep(interval)
+                }
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } catch (failure: IOException) {
+            if (!video.isClosed) {
+                ProjectionLog.failure("CarPlay 控制通道心跳失败", failure)
+                sockets.close()
+            }
+        }
+    }, "CarPlay connection heartbeat").apply { isDaemon = true; start() }
 
     private fun openAudio(
         info: NSDictionary, host: InetAddress, control: RtspControl, keys: CarPlaySessionKeys,

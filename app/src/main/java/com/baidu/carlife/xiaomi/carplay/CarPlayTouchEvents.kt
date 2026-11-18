@@ -59,7 +59,7 @@ internal class CarPlayTouchEvents(
             socket.getInputStream(), keys.eventRead(),
         )))
         val output = CarPlayControlRecords.output(socket.getOutputStream(), keys.eventWrite())
-        val incomingIap = PipedInputStream(65_536)
+        val incomingIap = PipedInputStream(IAP_BUFFER_BYTES)
         val iapWriter = PipedOutputStream(incomingIap)
         val outgoingIap = object : OutputStream() {
             override fun write(value: Int) = write(byteArrayOf(value.toByte()))
@@ -86,10 +86,20 @@ internal class CarPlayTouchEvents(
                 }
             }
         }, "CarPlay network iAP2").apply { isDaemon = true }.start()
-        iapWriter.use { readCommands(input, output, it) }
+        iapWriter.use {
+            readCommands(input, output) { bytes ->
+                // Only this thread writes to the pipe. Its reader can only free capacity.
+                // A blocked iAP2 consumer must never block event replies and touch dispatch.
+                if (bytes.size > IAP_BUFFER_BYTES - incomingIap.available()) {
+                    throw ProtocolException("Network iAP2 event backlog exceeds the size limit")
+                }
+                it.write(bytes)
+                it.flush()
+            }
+        }
     }
 
-    private fun readCommands(input: DataInputStream, output: OutputStream, iap: OutputStream) {
+    private fun readCommands(input: DataInputStream, output: OutputStream, forwardIap: (ByteArray) -> Unit) {
         while (true) {
             val start = line(input) ?: return
             val fields = mutableMapOf<String, String>()
@@ -124,8 +134,7 @@ internal class CarPlayTouchEvents(
                     dispatchInput { CarlifeConnectService.requestKeyFrame() }
                 } else if (type == "iAPSendMessage") {
                     val params = command.objectForKey("params") as? NSDictionary
-                    (params?.objectForKey("data") as? NSData)?.bytes()?.let(iap::write)
-                    iap.flush()
+                    (params?.objectForKey("data") as? NSData)?.bytes()?.let(forwardIap)
                 }
             }
             synchronized(output) {
@@ -192,6 +201,7 @@ internal class CarPlayTouchEvents(
     }
 
     private companion object {
+        const val IAP_BUFFER_BYTES = 65_536
         val inputOwnerLock = Any()
         var inputOwner: CarPlayTouchEvents? = null
     }
