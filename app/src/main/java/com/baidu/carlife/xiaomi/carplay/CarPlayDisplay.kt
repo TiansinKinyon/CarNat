@@ -25,8 +25,9 @@ internal data class CarPlayDisplay(val uuid: String, val resolution: CarPlayReso
                 ?: throw ProtocolException("CarPlay receiver did not advertise a main display")
             val uuid = (display.objectForKey("uuid") as? NSString)?.content?.takeIf { it.isNotBlank() }
                 ?: throw ProtocolException("CarPlay main display has no UUID")
-            val maxFps = (display.objectForKey("maxFPS") as? NSNumber)?.longValue()
-                ?.takeIf { it in 1L..Int.MAX_VALUE }?.toInt()
+            val maxFps = (display.objectForKey("maxFPS") as? NSNumber)?.takeIf { it.isInteger }
+                ?.longValue()?.takeIf { it > 0 }
+                ?.coerceAtMost(ProjectionPreferences.frameRates.last.toLong())?.toInt()
             return CarPlayDisplay(
                 uuid,
                 CarPlayResolution(display.pixels("widthPixels"), display.pixels("heightPixels"), maxFps),
@@ -37,8 +38,8 @@ internal data class CarPlayDisplay(val uuid: String, val resolution: CarPlayReso
             get() = (objectForKey("type") as? NSNumber)?.longValue()
 
         private fun NSDictionary.pixels(key: String): Int {
-            return (objectForKey(key) as? NSNumber)?.longValue()
-                ?.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt()
+            return (objectForKey(key) as? NSNumber)?.takeIf { it.isInteger }?.longValue()
+                ?.takeIf { it in 1L..ProjectionPreferences.dimensions.last.toLong() }?.toInt()
                 ?: throw ProtocolException("Invalid CarPlay main display dimension: $key")
         }
     }

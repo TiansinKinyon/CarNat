@@ -864,13 +864,17 @@ class CarlifeConnectService : Service() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
                 override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
                     if (closed) return
-                    val width = format.visibleDimension(MediaFormat.KEY_WIDTH, MediaFormat.KEY_CROP_LEFT, MediaFormat.KEY_CROP_RIGHT)
-                    val height = format.visibleDimension(MediaFormat.KEY_HEIGHT, MediaFormat.KEY_CROP_TOP, MediaFormat.KEY_CROP_BOTTOM)
-                    mutableState.update { it.copy(outputWidth = width, outputHeight = height) }
-                    val sps = format.getByteBuffer("csd-0")
-                    ProjectionLog.event("AVC 输出格式 · ${width}×${height} · hasSps=${sps != null}")
-                    if (sps == null) return
-                    readConfiguration(sps, format.getByteBuffer("csd-1"))
+                    try {
+                        val width = format.visibleDimension(MediaFormat.KEY_WIDTH, MediaFormat.KEY_CROP_LEFT, MediaFormat.KEY_CROP_RIGHT)
+                        val height = format.visibleDimension(MediaFormat.KEY_HEIGHT, MediaFormat.KEY_CROP_TOP, MediaFormat.KEY_CROP_BOTTOM)
+                        mutableState.update { it.copy(outputWidth = width, outputHeight = height) }
+                        val sps = format.getByteBuffer("csd-0")
+                        ProjectionLog.event("AVC 输出格式 · ${width}×${height} · hasSps=${sps != null}")
+                        if (sps != null) readConfiguration(sps, format.getByteBuffer("csd-1"))
+                    } catch (error: RuntimeException) {
+                        ProjectionLog.failure("读取 AVC 输出格式失败", error)
+                        fail("无法读取视频编码器输出格式")
+                    }
                 }
 
                 override fun onError(codec: MediaCodec, error: MediaCodec.CodecException) {
@@ -888,9 +892,9 @@ class CarlifeConnectService : Service() {
                         } finally {
                             codec.releaseOutputBuffer(index, false)
                         }
-                    } catch (error: IllegalStateException) {
+                    } catch (error: RuntimeException) {
                         ProjectionLog.failure("读取或释放 AVC 输出缓冲失败", error)
-                        fail(error.message ?: "Could not release encoder output")
+                        fail("无法读取或释放视频编码器输出")
                         return
                     }
                     if (info.size <= 0 || info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) return
@@ -1001,10 +1005,15 @@ class CarlifeConnectService : Service() {
                 manager?.stopCast()
             } catch (_: RemoteException) {
                 // CarWith may already have exited.
+            } catch (error: RuntimeException) {
+                ProjectionLog.failure("停止 CarWith 采集失败", error)
             } finally {
-                if (bound) unbindService(this)
+                if (bound) {
+                    runCatching { unbindService(this) }
+                        .onFailure { ProjectionLog.failure("解绑 CarWith 失败", it) }
+                }
                 runCatching { codec?.release() }
-                surface?.release()
+                runCatching { surface?.release() }
                 mutableState.update {
                     it.copy(
                         phase = if (it.phase == CapturePhase.FAILED) CapturePhase.FAILED else CapturePhase.STOPPED,

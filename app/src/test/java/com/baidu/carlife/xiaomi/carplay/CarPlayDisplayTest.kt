@@ -49,6 +49,17 @@ class CarPlayDisplayTest {
     }
 
     @Test(expected = ProtocolException::class)
+    fun rejectsDisplayLargerThanTheSupportedEncoderDimension() {
+        CarPlayDisplay.fromReceiverInfo(info(display("main", 4097, 1080, 110)))
+    }
+
+    @Test
+    fun limitsAdvertisedFrameRateBeforeConfiguringTheEncoder() {
+        val advertised = display("main", 1920, 1080, 110).apply { put("maxFPS", Int.MAX_VALUE) }
+        assertEquals(120, CarPlayDisplay.fromReceiverInfo(info(advertised)).resolution.frameRate)
+    }
+
+    @Test(expected = ProtocolException::class)
     fun rejectsClusterOnlyDisplay() {
         CarPlayDisplay.fromReceiverInfo(info(display("cluster", 1280, 480, 111)))
     }

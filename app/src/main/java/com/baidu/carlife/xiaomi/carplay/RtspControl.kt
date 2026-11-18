@@ -74,7 +74,8 @@ internal class RtspControl(
             output.flush()
             val response = readResponse(sequence)
             val elapsed = (System.nanoTime() - started) / 1_000_000
-            if (method != "OPTIONS" || response.status !in 200..299 || elapsed >= 1_000) {
+            val heartbeat = method == "OPTIONS" || (method == "POST" && target == "/feedback")
+            if (!heartbeat || response.status !in 200..299 || elapsed >= 1_000) {
                 ProjectionLog.event("$requestName · 状态=${response.status} · 用时=${elapsed}ms · 响应=${response.body.size}B")
             }
             return response

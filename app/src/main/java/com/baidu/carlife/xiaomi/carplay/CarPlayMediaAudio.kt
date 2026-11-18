@@ -64,6 +64,8 @@ internal class CarPlayMediaAudio(
             Thread.currentThread().interrupt()
         } catch (failure: Exception) {
             if (!socket.isClosed) Log.w(TAG, "Audio sender stopped", failure)
+        } finally {
+            detach()
         }
     }, "CarPlay audio").apply { isDaemon = true }
 
@@ -168,9 +170,14 @@ internal class CarPlayMediaAudio(
     private val cipher = Cipher.getInstance("ChaCha20-Poly1305")
 
     override fun close() {
+        detach()
+        sender.interrupt()
+    }
+
+    private fun detach() {
         synchronized(Companion) { active.remove(stream, this) }
         socket.close()
-        sender.interrupt()
+        queue.clear()
     }
 
     private data class Chunk(val bytes: ByteArray, val rate: Int, val channels: Int)
