@@ -105,6 +105,10 @@ internal class CarPlaySessionKeys(private val sharedSecret: ByteArray) {
     fun eventRead() = PairingCrypto.derive(sharedSecret, "Events-Salt", "Events-Write-Encryption-Key")
     fun eventWrite() = PairingCrypto.derive(sharedSecret, "Events-Salt", "Events-Read-Encryption-Key")
 
+    fun microphone(connectionId: Long): ByteArray = PairingCrypto.derive(
+        sharedSecret, "DataStream-Salt$connectionId", "DataStream-Input-Encryption-Key",
+    )
+
     fun video(connectionId: Long): ByteArray = PairingCrypto.derive(
         sharedSecret, "DataStream-Salt$connectionId", "DataStream-Output-Encryption-Key",
     )

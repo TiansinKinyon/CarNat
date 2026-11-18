@@ -19,6 +19,7 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -60,9 +61,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AudioPreference
+import com.baidu.carlife.xiaomi.carplay.CarPlayMicrophone
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
 import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
+import com.baidu.carlife.xiaomi.ui.MicrophoneLevelMeter
+import com.baidu.carlife.xiaomi.ui.liveMicrophoneSample
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 import kotlin.math.roundToInt
 
@@ -88,6 +92,7 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
     val editable = active && !capture.active
     var connectionMode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
     var showConnectionMode by remember { mutableStateOf(false) }
+    var showMicrophone by remember { mutableStateOf(false) }
 
     fun save(updated: ProjectionPreferences) {
         if (!editable) return
@@ -103,6 +108,7 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             SettingsRow("连接方式", connectionMode.label, active, capture.active, leadingIcon = {
                 Icon(painterResource(R.drawable.ic_connect), contentDescription = null)
             }) { showConnectionMode = true }
+
         }
         SettingsCard {
             SettingsRow(Editor.RESOLUTION.title, preferences.width?.let { "$it × ${preferences.height}" } ?: "跟随车机", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_aspect_ratio), contentDescription = null) }) {
@@ -128,6 +134,14 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             SettingsRow(Editor.AUDIO_BUFFER.title, audioBufferSummary, active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_edit_audio), contentDescription = null) }) {
                 editor = Editor.AUDIO_BUFFER
             }
+            SettingsDivider()
+            SettingsRow(
+                "麦克风输入（实验性）",
+                if (preferences.useCarMicrophone) "车机麦克风" else "手机麦克风",
+                active,
+                false,
+                leadingIcon = { Icon(painterResource(R.drawable.ic_mic), contentDescription = null) },
+            ) { showMicrophone = true }
         }
         if (error) SaveError()
         SettingsCard {
@@ -154,10 +168,75 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             showConnectionMode = false
         }
     }
+    if (showMicrophone && active) {
+        MicrophoneDialog(
+            enabled = preferences.useCarMicrophone,
+            projecting = capture.active,
+            onToggle = { save(preferences.copy(useCarMicrophone = it)) },
+            onDismiss = { showMicrophone = false },
+        )
+    }
     val selected = editor
     if (selected != null && editable) {
         ProjectionEditor(selected, preferences, onDismiss = { editor = null }, onSave = ::save)
     }
+}
+
+@Composable
+private fun MicrophoneDialog(
+    enabled: Boolean,
+    projecting: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var testing by remember(enabled, projecting) { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("麦克风输入（实验性）") },
+        text = {
+            Column {
+                Text("切换后，必须在 CarWith 车机端设置中同步切换麦克风输入。")
+                Column(Modifier.selectableGroup()) {
+                    listOf(false to "手机麦克风", true to "车机麦克风").forEach { (useCarMic, label) ->
+                        val selected = enabled == useCarMic
+                        ListItem(
+                            headlineContent = { Text(label) },
+                            leadingContent = { RadioButton(selected = selected, onClick = null, enabled = !projecting) },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.selectable(
+                                selected = selected,
+                                enabled = !projecting,
+                                role = Role.RadioButton,
+                                onClick = { onToggle(useCarMic) },
+                            ),
+                        )
+                    }
+                }
+                if (enabled) {
+                    Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (testing) {
+                            MicrophoneTestMeter()
+                        } else {
+                            Text(
+                                "请先连接到车机，然后开始测试。",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Button(onClick = { testing = !testing }, enabled = projecting) {
+                            Text(if (testing) "停止测试" else "测试麦克风")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+@Composable
+private fun MicrophoneTestMeter() {
+    val stream by CarPlayMicrophone.active.collectAsStateWithLifecycle()
+    MicrophoneLevelMeter(liveMicrophoneSample(stream)?.level ?: 0f)
 }
 
 @Composable

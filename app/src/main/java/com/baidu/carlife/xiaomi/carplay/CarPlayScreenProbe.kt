@@ -62,7 +62,10 @@ internal object CarPlayScreenProbe {
         }
         val eventPort = port(parse(request(control, "SETUP", "/setup", session)), "eventPort")
         connect(sockets, host, eventPort).use { events ->
-            CarPlayTouchEvents(events, keys, control, resolution.width, resolution.height, certificate, sockets::close, onStage).start()
+            CarPlayTouchEvents(
+                events, keys, control, resolution.width, resolution.height, certificate,
+                sockets::close, onStage,
+            ).start()
             onStage("事件通道已连接，正在协商主屏视频")
             val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
             val stream = NSDictionary().apply {
@@ -83,36 +86,42 @@ internal object CarPlayScreenProbe {
             connect(sockets, host, dataPort).use { video ->
                 openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = false).use { audio ->
                     openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = true).use { navigation ->
-                        request(control, "RECORD", "/", NSDictionary())
-                        audio?.start()
-                        navigation?.start()
-                        val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
-                        if (!CarlifeConnectService.state.value.active) return connected
-                        onStage(connected)
-                        val heartbeat = Thread({
+                        val microphone = if (preferences.useCarMicrophone) {
+                            CarPlayMicrophone.open(receiverInfo, control, keys, sockets, host)
+                        } else null
+                        microphone.use {
+                            request(control, "RECORD", "/", NSDictionary())
+                            microphone?.start()
+                            audio?.start()
+                            navigation?.start()
+                            val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
+                            if (!CarlifeConnectService.state.value.active) return connected
+                            onStage(connected)
+                            val heartbeat = Thread({
+                                    try {
+                                        while (!video.isClosed) {
+                                            Thread.sleep(3_000)
+                                            val reply = control.request("OPTIONS", "*")
+                                            if (reply.status in 500..599) {
+                                                throw ProtocolException("CarPlay heartbeat returned ${reply.status}")
+                                            }
+                                        }
+                                    } catch (_: InterruptedException) {
+                                        Thread.currentThread().interrupt()
+                                    } catch (failure: java.io.IOException) {
+                                        if (!video.isClosed) {
+                                            android.util.Log.i("CarNatIap2", "CarPlay 控制通道失联：${failure.message}")
+                                            ProjectionLog.failure("CarPlay 控制通道心跳失败", failure)
+                                            sockets.close()
+                                        }
+                                    }
+                                }, "CarPlay connection heartbeat").apply { isDaemon = true; start() }
                         try {
-                            while (!video.isClosed) {
-                                Thread.sleep(3_000)
-                                val reply = control.request("OPTIONS", "*")
-                                if (reply.status in 500..599) {
-                                    throw ProtocolException("CarPlay heartbeat returned ${reply.status}")
-                                }
-                            }
-                        } catch (_: InterruptedException) {
-                            Thread.currentThread().interrupt()
-                        } catch (failure: java.io.IOException) {
-                            if (!video.isClosed) {
-                                android.util.Log.i("CarNatIap2", "CarPlay 控制通道失联：${failure.message}")
-                                ProjectionLog.failure("CarPlay 控制通道心跳失败", failure)
-                                sockets.close()
-                            }
+                            return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                        } finally {
+                            heartbeat.interrupt()
                         }
-                    }, "CarPlay connection heartbeat").apply { isDaemon = true; start() }
-                    try {
-                        return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
-                    } finally {
-                        heartbeat.interrupt()
-                    }
+                        }
                     }
                 }
             }
