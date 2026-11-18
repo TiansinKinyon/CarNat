@@ -1,13 +1,8 @@
-version: '1.0'
+version: "1.0"
 name: carnat-android-release
 displayName: CarNat Android Release
-triggers:
-  push:
-    tags:
-      include:
-        - '^v[0-9]+\.[0-9]+\.[0-9]+$'
 stages:
-  - name: build
+  - name: Build and sign APK
     displayName: Build and sign APK
     strategy: naturally
     trigger: auto
@@ -15,15 +10,16 @@ stages:
       - step: build@gradle
         name: build_android
         displayName: Build CarNat
-        jdkVersion: '17'
-        gradleVersion: '4.4'
+        jdkVersion: "17"
+        gradleVersion: "4.4"
         commands:
           - bash .workflow/build-gitee-release.sh
         artifacts:
           - name: CARNAT_APK
             path:
               - release-artifacts
-  - name: release
+            type: .tar.gz
+  - name: Publish Gitee Release
     displayName: Publish Gitee Release
     strategy: naturally
     trigger: auto
@@ -31,12 +27,27 @@ stages:
       - step: release@gitee
         name: publish_gitee
         displayName: Publish CarNat
-        tagName: ${CARNAT_RELEASE_TAG}
-        releaseName: CarNat ${CARNAT_RELEASE_TAG}
-        description: 'CarNat ${CARNAT_RELEASE_TAG} for Xiaomi. Download the signed APK below.'
+        releaseName: "CarNat ${CARNAT_RELEASE_TAG}"
+        description: "CarNat ${CARNAT_RELEASE_TAG} for Xiaomi. Download the signed APK\
+      \ below."
+        tagName: "${CARNAT_RELEASE_TAG}"
         upstreamArtifact:
           - CARNAT_APK
         assertFiles:
-          - release-artifacts/CarNat-Xiaomi-${CARNAT_RELEASE_TAG}.apk
+          - "release-artifacts/CarNat-Xiaomi-${CARNAT_RELEASE_TAG}.apk"
         prerelease: false
         allowUpdate: false
+triggers:
+  trigger: auto
+  push:
+    tags:
+      prefix: []
+      precise: []
+      include:
+        - "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+notify: []
+ref_variable:
+  - ANDROID_KEYSTORE_BASE64
+  - ANDROID_KEYSTORE_PASSWORD
+  - ANDROID_KEY_ALIAS
+  - ANDROID_KEY_PASSWORD
