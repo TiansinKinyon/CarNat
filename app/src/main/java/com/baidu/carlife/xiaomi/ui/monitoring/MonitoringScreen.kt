@@ -31,8 +31,11 @@ import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.service.ReceiverConnection
 import com.baidu.carlife.xiaomi.carplay.CarPlayAudioInfo
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
+import com.baidu.carlife.xiaomi.carplay.CarPlayMicrophone
 import com.baidu.carlife.xiaomi.carplay.ReceiverDiagnostics
 import com.baidu.carlife.xiaomi.carplay.ReceiverWifi
+import com.baidu.carlife.xiaomi.ui.MicrophoneLevelMeter
+import com.baidu.carlife.xiaomi.ui.liveMicrophoneSample
 import com.baidu.carlife.xiaomi.ui.theme.CarNatTheme
 
 @Composable
@@ -75,6 +78,7 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
         MonitoringSection("音频") {
             AudioMetrics("媒体", receiver.mediaAudio)
             AudioMetrics("导航", receiver.navigationAudio)
+            MicrophoneMetrics()
         }
 
         MonitoringSection("连接") {
@@ -120,6 +124,26 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
             Metric("手机投屏 IP 地址", receiver.phoneIps.takeIf { it.isNotEmpty() }?.joinToString("\n"))
         }
     }
+}
+
+@Composable
+private fun MicrophoneMetrics() {
+    val stream by CarPlayMicrophone.active.collectAsStateWithLifecycle()
+    val microphone = stream
+    val reading = liveMicrophoneSample(microphone)
+    Metric("车机麦克风上行状态", when {
+        microphone == null -> "语音流未建立"
+        reading == null -> "等待车机音频"
+        else -> "正在接收"
+    })
+    AudioMetrics("车机麦克风", microphone?.format)
+    ListItem(
+        headlineContent = { Text("实时麦克风音量") },
+        supportingContent = {
+            MicrophoneLevelMeter(reading?.level ?: 0f, Modifier.padding(top = 8.dp))
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+    )
 }
 
 @Composable

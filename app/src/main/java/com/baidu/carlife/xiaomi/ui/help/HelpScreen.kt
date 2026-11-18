@@ -48,7 +48,8 @@ internal fun HelpScreen() {
             "CarWith 发起方式进行连接（推荐）",
             "使用 CarWith 发起方式支持后续上车自动连接，并且无需操作本软件。建议在连接前先填写本机蓝牙地址，部分车机可能需要该内容。\n\n" +
                     "请在 CarWith > CarLife 连接 > 无线连接 > 车辆热点 选择车机蓝牙并打开WLAN，然后开始连接。\n\n" +
-                    "自动连接：连接成功后，在 CarWith 我的车 中点击相应车辆，打开“无线自动连接”（默认开启）"
+                    "自动连接：连接成功后，在 CarWith 我的车 中点击相应车辆，打开“无线自动连接”（默认开启）",
+            leadingIcon = { Icon(painterResource(R.drawable.ic_link), contentDescription = null) }
         )
 
         HelpSection(
@@ -61,6 +62,14 @@ internal fun HelpScreen() {
                     "加快连接速度：由于 CarWith 在启动时会先强行停止 CarLife 组件（CarNat），然后再重新启动。为实现跟随车机的分辨率与帧率设置，会在正式连接前先进行一次 Carplay 连接获取相应数据。\n" +
                     "为加快连接速度，可以在 设置 页面自定义分辨率和帧率。当应用自定义分辨率和帧率时，会先启动 CarWith，然后再连接 Carplay。通过减少一次连接以加快速度。\n" +
                     "可以在“检测”页面找到车机的 请求分辨率、接收帧率上限，作为参考。",
+            leadingIcon = { Icon(painterResource(R.drawable.ic_link), contentDescription = null) }
+        )
+
+        HelpSection(
+            "麦克风输入（实验性）",
+            "默认使用手机麦克风作为 CarWith 麦克风。切换后，必须在 CarWith 车机端设置中同步切换麦克风输入。\n\n" +
+                    "设置 > 音频设置 > 麦克风",
+            leadingIcon = { Icon(painterResource(R.drawable.ic_mic), contentDescription = null) }
         )
     }
 }

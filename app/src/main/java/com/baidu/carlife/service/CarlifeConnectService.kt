@@ -489,6 +489,19 @@ class CarlifeConnectService : Service() {
         private var surface: Surface? = null
         private var bound = false
         private var closed = false
+        private val microphoneSink: (ByteArray) -> Boolean = { pcm ->
+            val listener = audioListener
+            if (listener == null) false else try {
+                // These Binder fields are sample rate, channel count and Android PCM encoding.
+                listener.onReceiveAudioStream(pcm, 16_000, 1, 2)
+                true
+            } catch (_: RemoteException) {
+                false
+            }
+        }
+
+        @Volatile
+        private var audioListener: IRemoteAudioListener? = null
         private var frames = 0L
         private var bytes = 0L
         private var sampledAtMs = 0L
@@ -744,8 +757,24 @@ class CarlifeConnectService : Service() {
                 }
             }
             override fun notifyAudioState(state: Int) = Unit
-            override fun addAudioListener(listener: IRemoteAudioListener?) = Unit
-            override fun removeAudioListener(listener: IRemoteAudioListener?) = Unit
+            override fun addAudioListener(listener: IRemoteAudioListener?) {
+                if (listener == null) return
+                worker.post {
+                    if (!closed) {
+                        audioListener = listener
+                        remoteMicrophoneSink = microphoneSink
+                    }
+                }
+            }
+
+            override fun removeAudioListener(listener: IRemoteAudioListener?) {
+                worker.post {
+                    if (listener?.asBinder() == audioListener?.asBinder()) {
+                        audioListener = null
+                        if (remoteMicrophoneSink === microphoneSink) remoteMicrophoneSink = null
+                    }
+                }
+            }
         }
 
         fun bind(size: CarPlayResolution) {
@@ -956,6 +985,8 @@ class CarlifeConnectService : Service() {
             keyListener = null
             worker.removeCallbacks(timeout)
             worker.removeCallbacks(sampleOutput)
+            audioListener = null
+            if (remoteMicrophoneSink === microphoneSink) remoteMicrophoneSink = null
             try {
                 manager?.stopCast()
             } catch (_: RemoteException) {
@@ -1012,6 +1043,11 @@ class CarlifeConnectService : Service() {
 
         @Volatile
         private var remoteKeySink: ((Int) -> Unit)? = null
+
+        @Volatile
+        private var remoteMicrophoneSink: ((ByteArray) -> Boolean)? = null
+
+        internal fun remoteMicrophone(pcm: ByteArray): Boolean = remoteMicrophoneSink?.invoke(pcm) ?: false
 
         internal fun remoteKey(code: Int) {
             remoteKeySink?.invoke(code)

@@ -14,6 +14,7 @@ internal data class ProjectionPreferences(
     val audioPreference: AudioPreference = AudioPreference.AUTO,
     val mediaBufferMs: Int? = null,
     val navigationBufferMs: Int? = null,
+    val useCarMicrophone: Boolean = false,
 ) {
     val manualDisplayMode: CarPlayResolution?
         get() {
@@ -37,6 +38,7 @@ internal data class ProjectionPreferences(
         .putString("audio_preference", audioPreference.name)
         .putInt("media_buffer", mediaBufferMs ?: 0)
         .putInt("navigation_buffer", navigationBufferMs ?: 0)
+        .putBoolean("use_car_microphone", useCarMicrophone)
         .commit()
 
     companion object {
@@ -64,6 +66,7 @@ internal data class ProjectionPreferences(
                 audioPreference = audioPreference ?: AudioPreference.AUTO,
                 mediaBufferMs = read("media_buffer", audioBuffers),
                 navigationBufferMs = read("navigation_buffer", audioBuffers),
+                useCarMicrophone = prefs.getBoolean("use_car_microphone", false),
             )
         }
     }
