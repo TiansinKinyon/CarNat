@@ -18,6 +18,9 @@ import java.net.InetAddress
 import java.net.ProtocolException
 import java.security.GeneralSecurityException
 import java.security.SecureRandom
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -37,13 +40,14 @@ internal class CarPlayMicrophone private constructor(
 
     private val sample = MutableStateFlow<MicrophoneSample?>(null)
     val samples = sample.asStateFlow()
+    // Accessed only by the single process-wide microphone delivery worker.
+    private var delivered = false
 
     fun start() {
         activeStream.value = this
         Thread({
             val packet = DatagramPacket(ByteArray(4096), 4096)
             var received = false
-            var delivered = false
             var nextSampleAt = 0L
             var peak = 0
             try {
@@ -56,7 +60,6 @@ internal class CarPlayMicrophone private constructor(
                         received = true
                         ProjectionLog.event("车机麦克风 · 收到并解密 PCM")
                     }
-                    val forwarded = CarlifeConnectService.remoteMicrophone(pcm)
                     for (index in pcm.indices step 2) {
                         val value = (pcm[index + 1].toInt() shl 8) or (pcm[index].toInt() and 255)
                         peak = maxOf(peak, kotlin.math.abs(value))
@@ -67,10 +70,7 @@ internal class CarPlayMicrophone private constructor(
                         nextSampleAt = now + 100
                         peak = 0
                     }
-                    if (forwarded && !delivered) {
-                        delivered = true
-                        ProjectionLog.event("车机麦克风 · 已向 CarWith 音频回调发送 PCM")
-                    }
+                    forward(pcm)
                 }
             } catch (error: IOException) {
                 if (!socket.isClosed) ProjectionLog.failure("车机麦克风 · 接收失败", error)
@@ -78,6 +78,19 @@ internal class CarPlayMicrophone private constructor(
                 close()
             }
         }, "CarPlay microphone").apply { isDaemon = true }.start()
+    }
+
+    private fun forward(pcm: ByteArray) {
+        val receiver = CarlifeConnectService.microphoneReceiver() ?: return
+        delivery.execute {
+            if (socket.isClosed || activeStream.value !== this ||
+                CarlifeConnectService.microphoneReceiver() !== receiver
+            ) return@execute
+            if (receiver(pcm) && !delivered) {
+                delivered = true
+                ProjectionLog.event("车机麦克风 · 已向 CarWith 音频回调发送 PCM")
+            }
+        }
     }
 
     override fun close() {
@@ -88,6 +101,12 @@ internal class CarPlayMicrophone private constructor(
     companion object {
         private val activeStream = MutableStateFlow<CarPlayMicrophone?>(null)
         val active = activeStream.asStateFlow()
+        // A slow Binder call may occupy one worker. Drop incoming frames while it is busy.
+        private val delivery = ThreadPoolExecutor(
+            0, 1, 15, TimeUnit.SECONDS, SynchronousQueue(),
+            { task -> Thread(task, "CarWith microphone delivery").apply { isDaemon = true } },
+            ThreadPoolExecutor.DiscardPolicy(),
+        )
 
         private const val AUDIO_TYPE = "speechRecognition"
         private const val PCM_16K_MONO = 0x10
@@ -142,7 +161,7 @@ internal class CarPlayMicrophone private constructor(
                 if (!accepted) throw ProtocolException("Receiver did not return the microphone stream")
                 ProjectionLog.event("车机麦克风 · 已协商语音上行，等待 PCM")
                 CarPlayMicrophone(socket, host, keys.microphone(id))
-            } catch (error: IOException) {
+            } catch (error: Exception) {
                 socket.close()
                 ProjectionLog.failure("车机麦克风 · 语音流协商失败", error)
                 null

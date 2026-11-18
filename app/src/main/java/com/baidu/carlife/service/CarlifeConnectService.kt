@@ -489,13 +489,23 @@ class CarlifeConnectService : Service() {
         private var surface: Surface? = null
         private var bound = false
         private var closed = false
-        private val microphoneSink: (ByteArray) -> Boolean = { pcm ->
+        private val microphoneSink: (ByteArray) -> Boolean = ::deliverMicrophone
+
+        private fun deliverMicrophone(pcm: ByteArray): Boolean {
             val listener = audioListener
-            if (listener == null) false else try {
+            if (listener == null) return false
+            return try {
                 // These Binder fields are sample rate, channel count and Android PCM encoding.
                 listener.onReceiveAudioStream(pcm, 16_000, 1, 2)
                 true
-            } catch (_: RemoteException) {
+            } catch (failure: Exception) {
+                worker.post {
+                    if (audioListener === listener) {
+                        audioListener = null
+                        if (remoteMicrophoneSink === microphoneSink) remoteMicrophoneSink = null
+                        ProjectionLog.failure("车机麦克风 · CarWith 音频回调失败", failure)
+                    }
+                }
                 false
             }
         }
@@ -1047,7 +1057,7 @@ class CarlifeConnectService : Service() {
         @Volatile
         private var remoteMicrophoneSink: ((ByteArray) -> Boolean)? = null
 
-        internal fun remoteMicrophone(pcm: ByteArray): Boolean = remoteMicrophoneSink?.invoke(pcm) ?: false
+        internal fun microphoneReceiver(): ((ByteArray) -> Boolean)? = remoteMicrophoneSink
 
         internal fun remoteKey(code: Int) {
             remoteKeySink?.invoke(code)
