@@ -102,7 +102,7 @@ internal class CarPlayPairing(
         val protocolHeader = if (path == "/pair-setup") "X-Apple-HKP" to "2" else "X-Apple-PD" to "1"
         val headers = mapOf(protocolHeader, "Content-Type" to "application/pairing+tlv8")
         val response = control.request(
-            "POST", path, if (protocol.isBmw) headers + mapOf("X-Apple-HKP" to "2", "X-Apple-PD" to "1") else headers,
+            "POST", path, if (protocol.isVehicle) headers + mapOf("X-Apple-HKP" to "2", "X-Apple-PD" to "1") else headers,
             PairingTlv.encode(PairingTlv.STATE to byteArrayOf((state - 1).toByte()), *fields),
         )
         if (protocol.isBmw && path == "/pair-verify" && response.status == 404) {

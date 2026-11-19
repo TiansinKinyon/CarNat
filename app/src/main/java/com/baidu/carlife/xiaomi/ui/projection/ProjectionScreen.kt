@@ -73,6 +73,7 @@ import com.baidu.carlife.service.ReceiverConnection
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
+import com.baidu.carlife.xiaomi.carplay.HeadUnitProfile
 import com.baidu.carlife.xiaomi.carplay.ProjectionLinkStatus
 import com.baidu.carlife.xiaomi.carplay.connectionStatus
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
@@ -85,6 +86,7 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val status by CarlifeConnectService.state.collectAsState()
     var mode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
     var autoNeedsPermissions by remember { mutableStateOf(missingReceiverPermissions(context).isNotEmpty()) }
+    val volkswagen = HeadUnitProfile.load(context) == HeadUnitProfile.VOLKSWAGEN
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
     var phoneAddress by rememberSaveable { mutableStateOf(settings.address.uppercase(Locale.ROOT)) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -158,8 +160,8 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
                 selectedName = selectedName,
                 selectedAddress = settings.receiverAddress,
                 devices = devices,
-                enabled = active && !status.active && mode == ConnectionMode.MANUAL,
-                managedByCarWith = mode == ConnectionMode.CAR_WITH,
+                enabled = active && !status.active && (mode == ConnectionMode.MANUAL || volkswagen),
+                managedByCarWith = mode == ConnectionMode.CAR_WITH && !volkswagen,
                 expanded = expanded && active,
                 onDismiss = { expanded = false },
                 onOpen = {

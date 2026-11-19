@@ -15,7 +15,7 @@ internal class PairingCredentials(
 )
 
 /** App-private, excluded from Android backup, and scoped to a verified Bluetooth peer. */
-internal class BmwPairingStore(directory: File, phoneId: String, carAddress: String, certificate: X509Certificate) {
+internal class VehiclePairingStore(directory: File, phoneId: String, carAddress: String, certificate: X509Certificate, protocol: ReceiverProtocol) {
     private val file: AtomicFile
 
     init {
@@ -23,7 +23,8 @@ internal class BmwPairingStore(directory: File, phoneId: String, carAddress: Str
         digest.update(phoneId.toByteArray(Charsets.US_ASCII))
         digest.update(carAddress.toByteArray(Charsets.US_ASCII))
         val fingerprint = digest.digest(certificate.encoded).joinToString("") { "%02x".format(it.toInt() and 255) }
-        file = AtomicFile(File(directory, "carplay-bmw-$fingerprint"))
+        val brand = if (protocol.isBmw) "bmw" else "volkswagen"
+        file = AtomicFile(File(directory, "carplay-$brand-$fingerprint"))
     }
 
     fun read(): PairingCredentials? = try {

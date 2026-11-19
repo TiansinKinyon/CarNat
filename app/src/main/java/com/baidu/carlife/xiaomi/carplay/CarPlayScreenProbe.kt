@@ -47,15 +47,15 @@ internal object CarPlayScreenProbe {
     ): String = CarPlayTiming(host, sockets.openDatagram()).use { timing ->
         require(bluetoothAddress.matches(deviceId))
         val sessionUuid = UUID.randomUUID()
-        val sessionTarget = if (protocol.isBmw) {
+        val sessionTarget = if (protocol.isVehicle) {
             val address = host.hostAddress ?: throw ProtocolException("连接缺少车机地址")
             val authority = if (':' in address) "[${address.replace("%", "%25")}]" else address
             "rtsp://$authority/${sessionUuid.mostSignificantBits.toULong()}"
         } else "/"
         fun record() {
-            if (protocol.isBmw) {
+            if (protocol.isVehicle) {
                 val reply = control.request("RECORD", sessionTarget, plistHeaders)
-                BmwScreenResources.requireAcknowledgement("RECORD", reply)
+                VehicleScreenResources.requireAcknowledgement("RECORD", reply)
             } else {
                 request(control, "RECORD", "/", NSDictionary())
             }
@@ -70,9 +70,9 @@ internal object CarPlayScreenProbe {
             put("model", Build.MODEL)
             put("osName", "Android")
             put("osVersion", Build.VERSION.RELEASE)
-            put("sourceVersion", "540.31")
+            put("sourceVersion", if (protocol == ReceiverProtocol.VOLKSWAGEN) VolkswagenInvitation.SOURCE_VERSION else "540.31")
             put("sessionUUID", sessionUuid.toString().uppercase(Locale.ROOT))
-            if (protocol.isBmw) put("macAddress", deviceId.uppercase(Locale.ROOT))
+            if (protocol.isVehicle) put("macAddress", deviceId.uppercase(Locale.ROOT))
             put("sessionCorrelationUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
         }
         fun readDisplay(receiverInfo: NSDictionary): CarPlayDisplay =
@@ -83,18 +83,18 @@ internal object CarPlayScreenProbe {
             }
 
         val previousInfo = info?.let(::parse)
-        val previousDisplay = if (protocol.isBmw) null else readDisplay(checkNotNull(previousInfo))
-        val sessionReply = parse(request(control, "SETUP", if (protocol.isBmw) sessionTarget else "/setup", session))
-        val currentInfo = if (protocol.isBmw) CarPlayReceiverProbe.readInfo(control, protocol, required = false) else null
+        val previousDisplay = if (protocol.isVehicle) null else readDisplay(checkNotNull(previousInfo))
+        val sessionReply = parse(request(control, "SETUP", if (protocol.isVehicle) sessionTarget else "/setup", session))
+        val currentInfo = if (protocol.isVehicle) CarPlayReceiverProbe.readInfo(control, protocol, required = false) else null
         val receiverInfo = currentInfo?.let(::parse) ?: previousInfo ?: throw ProtocolException("车机未提供会话显示信息")
         val display = previousDisplay ?: readDisplay(receiverInfo)
         val resolution = display.resolution
         if (readResolutionOnly) {
-            if (protocol.isBmw) {
+            if (protocol.isVehicle) {
                 try {
                     control.request("TEARDOWN", sessionTarget, plistHeaders)
                 } catch (failure: IOException) {
-                    ProjectionLog.failure("宝马分辨率探测结束时车机已断开", failure)
+                    ProjectionLog.failure("分辨率探测结束时车机已断开", failure)
                 }
             }
             return "已读取车机主屏分辨率"
@@ -103,15 +103,15 @@ internal object CarPlayScreenProbe {
         val keepAlivePort = (sessionReply.objectForKey("keepAlivePort") as? NSNumber)
             ?.takeIf { it.isInteger }?.longValue()?.takeIf { it in 1L..65_535L }?.toInt()
         connect(sockets, host, eventPort).use { events ->
-            val resources = if (protocol.isBmw) BmwScreenResources(receiverInfo, protocol, sockets::close) else null
+            val resources = if (protocol.isVehicle) VehicleScreenResources(receiverInfo, protocol, sockets::close) else null
             val eventChannel = CarPlayTouchEvents(
                 events, keys, control, resolution.width, resolution.height, certificate,
                 sockets::close, onStage, resources?.let { state -> state::onCommand }, protocol,
             )
             eventChannel.start()
-            val heartbeat = if (protocol.isBmw) startHeartbeat(control, sockets, events, host, keepAlivePort) else null
+            val heartbeat = if (protocol.isVehicle) startHeartbeat(control, sockets, events, host, keepAlivePort) else null
             try {
-                if (protocol == ReceiverProtocol.BMW_MGU) record()
+                if (protocol == ReceiverProtocol.BMW_MGU || protocol == ReceiverProtocol.VOLKSWAGEN) record()
                 resources?.declareAndClaim(control)
                 resources?.requireScreen()
                 if (protocol == ReceiverProtocol.BMW_ID9) {
@@ -157,7 +157,7 @@ internal object CarPlayScreenProbe {
                                 CarPlayMicrophone.open(receiverInfo, control, keys, sockets, host)
                             } else null
                             microphone.use {
-                                if (!protocol.isBmw) record()
+                                if (!protocol.isVehicle) record()
                                 microphone?.start()
                                 audio?.start()
                                 navigation?.start()

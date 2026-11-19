@@ -4,7 +4,8 @@ import android.content.Context
 
 internal enum class HeadUnitProfile(val id: String, val label: String, val summary: String) {
     GENERIC("generic", "通用", "适用于 DiPlay、WinPlay 和其他接收端"),
-    BMW("bmw", "宝马（ID7–ID9）", "适用于 MGU 和 IDC23 无线 CarPlay 车机");
+    BMW("bmw", "宝马（ID7–ID9）", "适用于 MGU 和 IDC23 无线 CarPlay 车机"),
+    VOLKSWAGEN("volkswagen", "大众（MIB）", "先选择已配对的车机，并连接车机 Wi-Fi");
 
     fun save(context: Context) {
         settings(context).edit().putString("profile", id).apply()
@@ -12,6 +13,7 @@ internal enum class HeadUnitProfile(val id: String, val label: String, val summa
 
     fun protocol(model: String): ReceiverProtocol = when {
         this == GENERIC -> ReceiverProtocol.GENERIC
+        this == VOLKSWAGEN -> ReceiverProtocol.VOLKSWAGEN
         model.startsWith("IDC23", ignoreCase = true) -> ReceiverProtocol.BMW_ID9
         else -> ReceiverProtocol.BMW_MGU
     }
@@ -28,7 +30,8 @@ internal enum class HeadUnitProfile(val id: String, val label: String, val summa
 }
 
 internal enum class ReceiverProtocol {
-    GENERIC, BMW_MGU, BMW_ID9;
+    GENERIC, BMW_MGU, BMW_ID9, VOLKSWAGEN;
 
-    val isBmw get() = this != GENERIC
+    val isBmw get() = this == BMW_MGU || this == BMW_ID9
+    val isVehicle get() = this != GENERIC
 }

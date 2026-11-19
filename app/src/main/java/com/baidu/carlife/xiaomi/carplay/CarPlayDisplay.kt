@@ -22,12 +22,12 @@ internal data class CarPlayDisplay(val uuid: String, val resolution: CarPlayReso
             val displays = (info.objectForKey("displays") as? NSArray)?.array.orEmpty()
                 .filterIsInstance<NSDictionary>()
             val display = displays.firstOrNull { it.type == MAIN_SCREEN.toLong() }
-                ?: displays.firstOrNull { it.type == null || (protocol.isBmw && it.type == 0L) }
+                ?: displays.firstOrNull { it.type == null || (protocol.isVehicle && it.type == 0L) }
                 ?: throw ProtocolException("CarPlay receiver did not advertise a main display")
             val value = display.objectForKey("uuid")
             val uuid = when {
                 value is NSString -> value.content
-                protocol.isBmw && value is NSData && value.bytes().size == 16 -> {
+                protocol.isVehicle && value is NSData && value.bytes().size == 16 -> {
                     val bytes = java.nio.ByteBuffer.wrap(value.bytes())
                     java.util.UUID(bytes.long, bytes.long).toString().uppercase(java.util.Locale.ROOT)
                 }

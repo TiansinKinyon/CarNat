@@ -10,10 +10,10 @@ import java.net.ProtocolException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/** Tracks the initial screen grant for one BMW control session. */
-internal class BmwScreenResources(
+/** Tracks the initial screen grant for one vehicle control session. */
+internal class VehicleScreenResources(
     info: NSDictionary,
-    protocol: ReceiverProtocol,
+    private val protocol: ReceiverProtocol,
     private val onScreenRevoked: () -> Unit,
 ) {
     private val uiRequest = CountDownLatch(1)
@@ -61,8 +61,10 @@ internal class BmwScreenResources(
         declare(control)
         val needsClaim = synchronized(lock) { owner != 1 && !revoked }
         if (needsClaim) {
-            // MGU starts with a user-initiated screen request. Respect stronger constraints.
-            if (takeConstraint != 100 && takeConstraint != 500) {
+            // Volkswagen requires a real UI request before taking a user-initiated grant.
+            val granted = takeConstraint == 100 ||
+                (takeConstraint == 500 && (protocol.isBmw || awaitUiRequest()))
+            if (!granted) {
                 throw ProtocolException("车机保留主屏资源")
             }
             synchronized(lock) {

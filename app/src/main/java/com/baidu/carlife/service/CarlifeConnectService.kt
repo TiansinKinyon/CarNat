@@ -96,12 +96,14 @@ class CarlifeConnectService : Service() {
         }
         val deviceId = settings.address.takeIf(ReceiverSettings::validAddress)
             ?: ConnectionMode.automaticDeviceId(this)
+        val headUnit = HeadUnitProfile.load(this)
         val probe = BluetoothReceiverProbe(
             getSystemService(ConnectivityManager::class.java),
-            HeadUnitProfile.load(this),
+            headUnit,
             getSystemService(android.net.nsd.NsdManager::class.java),
             customPin = settings.pin.isNotEmpty(),
             pairingDirectory = noBackupFilesDir,
+            hasConfiguredPhoneAddress = ReceiverSettings.validAddress(settings.address),
         )
         receiverProbe = probe
         val timeout = projectionScope.launch {
@@ -140,7 +142,7 @@ class CarlifeConnectService : Service() {
                                 }
                             }
                         },
-                        receiverAddress = if (fromCarWith) "" else settings.receiverAddress,
+                        receiverAddress = if (fromCarWith && headUnit != HeadUnitProfile.VOLKSWAGEN) "" else settings.receiverAddress,
                         readResolutionOnly = readResolutionOnly,
                         preferences = preferences,
                         retryAfterDisconnect = !fromCarWith,

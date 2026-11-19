@@ -8,6 +8,7 @@ import java.io.Closeable
 import java.net.ProtocolException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -46,8 +47,19 @@ class HeadUnitProtocolTest {
         val body = BinaryPropertyListWriter.writeToArray(NSDictionary().apply { put("status", 1) })
         val rejected = control(reply(1, 200, body), ByteArrayOutputStream()).request("POST", "/command")
         assertThrows(ProtocolException::class.java) {
-            BmwScreenResources.requireAcknowledgement("资源声明", rejected)
+            VehicleScreenResources.requireAcknowledgement("资源声明", rejected)
         }
+    }
+
+    @Test
+    fun volkswagenKeepsItsOwnProtocolAndAcceptsOnlyConnectInvitations() {
+        assertEquals(ReceiverProtocol.VOLKSWAGEN, HeadUnitProfile.VOLKSWAGEN.protocol("VW4131"))
+        assertEquals(ReceiverProtocol.VOLKSWAGEN, HeadUnitProfile.VOLKSWAGEN.protocol("IDC23"))
+        assertFalse(ReceiverProtocol.VOLKSWAGEN.isBmw)
+        assertTrue(VolkswagenInvitation.isConnectRequest("GET /ctrl-int/1/connect?version=1 HTTP/1.1"))
+        assertFalse(VolkswagenInvitation.isConnectRequest("POST /ctrl-int/1/connect HTTP/1.1"))
+        assertFalse(VolkswagenInvitation.isConnectRequest("GET /ctrl-int/1/connect-extra HTTP/1.1"))
+        assertFalse(VolkswagenInvitation.isConnectRequest("GET /ctrl-int/1/connect RTSP/1.0"))
     }
 
     private fun reply(seq: Int, status: Int, body: ByteArray = byteArrayOf()): ByteArray =

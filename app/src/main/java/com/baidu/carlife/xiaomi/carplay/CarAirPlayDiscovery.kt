@@ -15,20 +15,22 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /** Only discovers services on the network obtained from the authenticated car's hotspot request. */
-internal object BmwAirPlayDiscovery {
+internal object CarAirPlayDiscovery {
     fun find(manager: NsdManager?, network: Network, link: LinkProperties): Pair<String, Int> {
-        if (manager != null && Build.VERSION.SDK_INT >= 34) {
-            val discovered = try {
-                discover(manager, network)?.let { resolve(manager, network, it) }
-            } catch (_: SecurityException) {
-                null
-            } catch (_: IllegalArgumentException) {
-                null
-            }
-            if (discovered != null) return discovered
-        }
+        findAdvertised(manager, network)?.let { return it }
         val gateway = link.routes.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }?.gateway
         return (gateway?.hostAddress ?: throw IOException("车机热点未公布 AirPlay 端点")) to 7000
+    }
+
+    fun findAdvertised(manager: NsdManager?, network: Network): Pair<String, Int>? {
+        if (manager == null || Build.VERSION.SDK_INT < 34) return null
+        return try {
+            discover(manager, network)?.let { resolve(manager, network, it) }
+        } catch (_: SecurityException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
     }
 
     @TargetApi(34)

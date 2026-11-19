@@ -2,6 +2,7 @@ package com.baidu.carlife.xiaomi.carplay
 
 import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import java.io.IOException
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ProtocolException
 import java.security.cert.X509Certificate
@@ -19,7 +20,8 @@ internal object CarPlayReceiverProbe {
         onAudio: (Boolean, CarPlayAudioInfo) -> Unit = { _, _ -> },
         protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
         customPin: Boolean = false,
-        pairingStore: BmwPairingStore? = null,
+        pairingStore: VehiclePairingStore? = null,
+        beforeHandshake: (InetAddress) -> Unit = {},
         onStage: (String) -> Unit,
     ): String {
         fun connect(saved: PairingCredentials?, replacing: Boolean): String = sockets.open().use { socket ->
@@ -29,11 +31,12 @@ internal object CarPlayReceiverProbe {
                 throw ProtocolException("CarPlay endpoint is not a remote unicast address")
             }
             socket.connect(InetSocketAddress(address, port), 5_000)
+            beforeHandshake(address)
             socket.soTimeout = 8_000
             RtspControl(socket.getInputStream(), socket.getOutputStream(), socket).use controlScope@{ control ->
                 val info = when (protocol) {
                     ReceiverProtocol.GENERIC -> readInfo(control, protocol)
-                    ReceiverProtocol.BMW_MGU -> readInfo(control, protocol, required = false)
+                    ReceiverProtocol.BMW_MGU, ReceiverProtocol.VOLKSWAGEN -> readInfo(control, protocol, required = false)
                     ReceiverProtocol.BMW_ID9 -> null
                 }
                 onStage("正在验证配对 PIN 和接收端身份")
@@ -50,7 +53,7 @@ internal object CarPlayReceiverProbe {
                             try {
                                 pairingStore.write(credentials)
                             } catch (failure: IOException) {
-                                ProjectionLog.failure("无法保存宝马网络配对记录", failure)
+                                ProjectionLog.failure("无法保存车机网络配对记录", failure)
                             }
                         }
                     }
@@ -58,7 +61,7 @@ internal object CarPlayReceiverProbe {
                         else "加密网络配对通过 · 车机未提供 MFi-SAP 接口"
                     if (deviceId.isEmpty()) return@controlScope authenticated
                     onStage(authenticated)
-                    if (readResolutionOnly && !protocol.isBmw) {
+                    if (readResolutionOnly && !protocol.isVehicle) {
                         val response = checkNotNull(info)
                         onResolution(CarPlayDisplay.fromReceiverInfo(CarPlayPlist.readDictionary(response)).resolution)
                         return@controlScope "已读取车机主屏分辨率"
@@ -84,10 +87,11 @@ internal object CarPlayReceiverProbe {
 
     /** An HTTP/RTSP rejection can be retried on this socket. A transport failure ends the attempt. */
     fun readInfo(control: RtspControl, protocol: ReceiverProtocol, required: Boolean = true): ByteArray? {
-        val headers = mapOf("User-Agent" to "AirPlay/540.31")
+        val version = if (protocol == ReceiverProtocol.VOLKSWAGEN) VolkswagenInvitation.SOURCE_VERSION else "540.31"
+        val headers = mapOf("User-Agent" to "AirPlay/$version")
         val get = control.request("GET", "/info", headers)
-        if (get.status in 200..299 && (!protocol.isBmw || get.body.isNotEmpty())) return get.body
-        if (protocol.isBmw) {
+        if (get.status in 200..299 && (!protocol.isVehicle || get.body.isNotEmpty())) return get.body
+        if (protocol.isVehicle) {
             val post = control.request("POST", "/info",
                 headers + ("Content-Type" to "application/x-apple-binary-plist"),
                 com.dd.plist.BinaryPropertyListWriter.writeToArray(com.dd.plist.NSDictionary()))

@@ -1,0 +1,190 @@
+package com.baidu.carlife.xiaomi.carplay
+
+import android.annotation.TargetApi
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.os.SystemClock
+import java.io.BufferedInputStream
+import java.io.Closeable
+import java.io.IOException
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
+
+/** One advertisement and one consumable invitation for the selected Wi-Fi network. */
+@TargetApi(33)
+internal class VolkswagenInvitation(
+    private val connectivity: ConnectivityManager,
+    private val nsd: NsdManager,
+    val network: Network,
+    private val localAddress: InetAddress,
+    private val deviceId: String,
+) : Closeable {
+    private class Invite(val host: InetAddress, val receivedAt: Long)
+
+    private val server = ServerSocket()
+    private val lock = java.lang.Object()
+    private var closed = false
+    private var registered = false
+    private var registrationFailed = false
+    private var client: Socket? = null
+    private var invite: Invite? = null
+    private val listener = object : NsdManager.RegistrationListener {
+        override fun onServiceRegistered(service: NsdServiceInfo) {
+            synchronized(lock) {
+                if (!closed) registered = true
+                else runCatching { nsd.unregisterService(this) }
+                lock.notifyAll()
+            }
+        }
+        override fun onRegistrationFailed(service: NsdServiceInfo, error: Int) {
+            synchronized(lock) {
+                registrationFailed = true
+                lock.notifyAll()
+            }
+        }
+        override fun onServiceUnregistered(service: NsdServiceInfo) = Unit
+        override fun onUnregistrationFailed(service: NsdServiceInfo, error: Int) = Unit
+    }
+
+    fun start() {
+        try {
+            server.bind(InetSocketAddress(localAddress, 0), 4)
+            nsd.registerService(NsdServiceInfo().apply {
+                serviceName = "sender"
+                serviceType = "_carplay-ctrl._tcp"
+                port = server.localPort
+                network = this@VolkswagenInvitation.network
+                setAttribute("id", deviceId)
+                setAttribute("srcvers", SOURCE_VERSION)
+            }, NsdManager.PROTOCOL_DNS_SD, listener)
+            Thread(::accept, "CarPlay Volkswagen invitation").apply { isDaemon = true; start() }
+        } catch (failure: Exception) {
+            close()
+            throw IOException("无法发布大众 CarPlay 控制服务", failure)
+        }
+    }
+
+    fun await(expected: InetAddress?): InetAddress {
+        val deadline = SystemClock.elapsedRealtime() + 25_000L
+        synchronized(lock) {
+            while (!closed && !registrationFailed) {
+                val now = SystemClock.elapsedRealtime()
+                val candidate = invite
+                if (registered && candidate != null && now - candidate.receivedAt < INVITE_LIFETIME &&
+                    (expected == null || expected == candidate.host)
+                ) {
+                    checkNetwork()
+                    return candidate.host
+                }
+                if (now >= deadline) break
+                try {
+                    lock.wait(deadline - now)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IOException("等待大众车机邀请已取消")
+                }
+            }
+        }
+        throw IOException("未收到本轮大众 CarPlay 邀请，请在车机上启动 Apple CarPlay")
+    }
+
+    fun requireFresh(host: InetAddress, consume: Boolean = false) {
+        synchronized(lock) {
+            checkNetwork()
+            val candidate = invite
+            if (closed || candidate?.host != host || SystemClock.elapsedRealtime() - candidate.receivedAt >= INVITE_LIFETIME) {
+                throw IOException("大众车机邀请已过期或端点已变化")
+            }
+            if (consume) invite = null
+        }
+    }
+
+    private fun checkNetwork() {
+        if (connectivity.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true ||
+            connectivity.getLinkProperties(network)?.linkAddresses?.none { it.address == localAddress } != false
+        ) throw IOException("大众车机 Wi-Fi 已变化")
+    }
+
+    private fun accept() {
+        try {
+            while (!server.isClosed) {
+                server.accept().use { socket ->
+                    synchronized(lock) {
+                        if (closed) return
+                        client = socket
+                    }
+                    try {
+                        handle(socket)
+                    } catch (_: IOException) {
+                        // Discard this request. Keep the current advertisement available.
+                    } finally {
+                        synchronized(lock) { client = null }
+                    }
+                }
+            }
+        } catch (_: IOException) {
+            close()
+        }
+    }
+
+    private fun handle(socket: Socket) {
+        val input = BufferedInputStream(socket.getInputStream())
+        val header = ByteArray(8192)
+        val deadline = SystemClock.elapsedRealtime() + 2_000L
+        for (index in header.indices) {
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining <= 0) throw SocketTimeoutException()
+            socket.soTimeout = remaining.toInt()
+            val byte = input.read()
+            if (byte < 0) return
+            header[index] = byte.toByte()
+            if (index >= 3 && header[index - 3] == 13.toByte() && header[index - 2] == 10.toByte() &&
+                header[index - 1] == 13.toByte() && byte == 10
+            ) {
+                val requestLine = String(header, 0, index + 1, Charsets.US_ASCII).substringBefore("\r\n")
+                if (!isConnectRequest(requestLine)) return
+                checkNetwork()
+                val host = socket.inetAddress
+                if (host.isLoopbackAddress || host.isAnyLocalAddress || host.isMulticastAddress) return
+                synchronized(lock) {
+                    if (closed) return
+                    socket.getOutputStream().write(RESPONSE)
+                    invite = Invite(host, SystemClock.elapsedRealtime())
+                    lock.notifyAll()
+                }
+                return
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            runCatching { server.close() }
+            runCatching { client?.close() }
+            lock.notifyAll()
+        }
+        runCatching { nsd.unregisterService(listener) }
+    }
+
+    companion object {
+        const val SOURCE_VERSION = "770.8.1"
+        private const val INVITE_LIFETIME = 20_000L
+        private val RESPONSE = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .toByteArray(Charsets.US_ASCII)
+
+        fun isConnectRequest(line: String): Boolean {
+            val fields = line.split(' ')
+            return fields.size == 3 && fields[0] == "GET" &&
+                fields[1].substringBefore('?') == "/ctrl-int/1/connect" &&
+                fields[2] in setOf("HTTP/1.0", "HTTP/1.1")
+        }
+    }
+}

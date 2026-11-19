@@ -28,8 +28,9 @@ internal object Iap2LinkProbe {
         input: InputStream, output: OutputStream, onWifi: (ReceiverWifi) -> Unit = {},
         profile: HeadUnitProfile = HeadUnitProfile.GENERIC, deviceId: String = "",
         onBmwAppsWindow: (Boolean) -> Unit = {},
+        initiateLink: Boolean = false,
         onStage: (String) -> Unit,
-    ): Endpoint = exchange(input, output, null, onWifi, onStage, profile, deviceId, onBmwAppsWindow)
+    ): Endpoint = exchange(input, output, null, onWifi, onStage, profile, deviceId, onBmwAppsWindow, initiateLink)
 
     fun runNetwork(input: InputStream, output: OutputStream, certificate: X509Certificate, onStage: (String) -> Unit) {
         exchange(input, output, certificate, {}, onStage)
@@ -42,6 +43,7 @@ internal object Iap2LinkProbe {
         profile: HeadUnitProfile = HeadUnitProfile.GENERIC,
         deviceId: String = "",
         onBmwAppsWindow: (Boolean) -> Unit = {},
+        initiateLink: Boolean = false,
     ): Endpoint {
         val incoming = DataInputStream(input)
         var repliedToDetection = false
@@ -61,6 +63,7 @@ internal object Iap2LinkProbe {
         var protocol = ReceiverProtocol.GENERIC
         var declaresAvailability = false
         var declaresWifiConfiguration = false
+        var declaresStartSession = false
         var legacyMguWifi = false
         var bmwAppsOnly = false
         var requestedFullCertificate = false
@@ -82,7 +85,7 @@ internal object Iap2LinkProbe {
 
         fun sendAvailability() {
             val available = parameter(0, byteArrayOf(1))
-            val identity = if (protocol.isBmw) parameter(1, cString(deviceId)) else byteArrayOf()
+            val identity = if (protocol.isVehicle) parameter(1, cString(deviceId)) else byteArrayOf()
             sendControl(0x4300, available + identity, parameterId = 1)
         }
 
@@ -104,7 +107,7 @@ internal object Iap2LinkProbe {
             requestWifi = containsMessage(identity[7], 0x5702)
             declaresAvailability = containsMessage(identity[7], 0x4300)
             declaresWifiConfiguration = containsMessage(identity[6], 0x5703)
-            val declaresStartSession = containsMessage(identity[6], 0x4301)
+            declaresStartSession = containsMessage(identity[6], 0x4301)
             legacyMguWifi = model.equals("MGU-55-BMW", ignoreCase = true) &&
                 requestWifi && declaresWifiConfiguration && !declaresAvailability
             bmwAppsOnly = protocol == ReceiverProtocol.BMW_MGU &&
@@ -126,6 +129,14 @@ internal object Iap2LinkProbe {
             sendControl(0x1d00)
             identificationSent = true
             onStage("已请求 iAP2 接收端身份")
+        }
+        if (initiateLink) {
+            // The phone initiates detection and SYN only on a selected outgoing accessory socket.
+            val sync = byteArrayOf(1, 4, 0x20, 0, 0, 100, 0, 50, 4, 3, 10, 0, 2)
+            output.write(detection)
+            output.write(frame(0x80, localSequence, 0, sync))
+            output.flush()
+            repliedToDetection = true
         }
         while (true) {
             if (incoming.readUnsignedByte() != 0xff) throw ProtocolException("Invalid iAP2 start byte")
@@ -219,11 +230,15 @@ internal object Iap2LinkProbe {
                                                 sendControl(0x4e0e, cString(deviceId))
                                                 return Endpoint(null, null, checkNotNull(leaf), wifi, protocol)
                                             }
+                                            if (protocol == ReceiverProtocol.VOLKSWAGEN && !declaresStartSession) {
+                                                sendControl(0x4e0e, cString(deviceId))
+                                                return Endpoint(null, null, checkNotNull(leaf), wifi, protocol)
+                                            }
                                             if (protocol == ReceiverProtocol.BMW_MGU && !declaresAvailability) sendAvailability()
                                         }
                                         0x4301 -> {
                                             val endpoint = receiverEndpoint(message, checkNotNull(leaf), wifi, protocol)
-                                            if (protocol == ReceiverProtocol.BMW_MGU) sendControl(0x4e0e, cString(deviceId))
+                                            if (protocol == ReceiverProtocol.BMW_MGU || protocol == ReceiverProtocol.VOLKSWAGEN) sendControl(0x4e0e, cString(deviceId))
                                             val address = endpoint.host?.let { "$it:${endpoint.port}" }
                                             onStage(if (address != null) "已收到 CarPlay 网络端点：$address"
                                                 else "已收到车机热点信息 · 等待 AirPlay 服务发现")
@@ -239,12 +254,12 @@ internal object Iap2LinkProbe {
                                 protocol = profile.protocol(model)
                                 readCapabilities(identity)
                                 sendControl(0x1d02)
-                                val askForSerial = protocol.isBmw && containsMessage(identity[6], 0xaa06)
+                                val askForSerial = protocol.isVehicle && containsMessage(identity[6], 0xaa06)
                                 sendControl(0xaa00, if (askForSerial) byteArrayOf() else null)
                                 requestedFullCertificate = !askForSerial
                                 awaitingCertificate = true
                             } else if (challenge == null) {
-                                if (id == 0xaa06 && protocol.isBmw && !requestedFullCertificate) {
+                                if (id == 0xaa06 && protocol.isVehicle && !requestedFullCertificate) {
                                     if (parameters(message)[0]?.isNotEmpty() != true) {
                                         throw ProtocolException("车机未提供 MFi 序列号")
                                     }
@@ -292,6 +307,14 @@ internal object Iap2LinkProbe {
                                             else startMguWifi()
                                         }
                                         ReceiverProtocol.BMW_ID9 -> sendAvailability()
+                                        ReceiverProtocol.VOLKSWAGEN -> {
+                                            sendAvailability()
+                                            if (requestWifi || declaresWifiConfiguration) sendControl(0x5702)
+                                            else if (!declaresStartSession) {
+                                                sendControl(0x4e0e, cString(deviceId))
+                                                return Endpoint(null, null, checkNotNull(leaf), null, protocol)
+                                            }
+                                        }
                                     }
                                 } else {
                                     onStage("网络 iAP2 已认证")
@@ -361,14 +384,14 @@ internal object Iap2LinkProbe {
         // Some receivers shift the wireless field IDs by one. Either layout can repeat its IP field.
         val alternatives = mutableListOf<ByteArray>()
         val network = parameters(wireless, start = 0, repeatableFields = setOf(3, 4)) { _, bytes ->
-            if (protocol.isBmw && alternatives.size < 8) alternatives.add(bytes)
+            if (protocol.isVehicle && alternatives.size < 8) alternatives.add(bytes)
         }
         val offset = if (0 !in network && 5 in network) 1 else 0
         val primaryHost = network[3 + offset]?.let(::endpointText)
-        val layoutB = protocol.isBmw && network[2]?.lastOrNull() == 0.toByte() &&
+        val layoutB = protocol.isVehicle && network[2]?.lastOrNull() == 0.toByte() &&
             network[3]?.singleOrNull()?.toInt()?.let { it in 0..4 } == true &&
             network[4]?.singleOrNull() != null
-        val wifi = if (!protocol.isBmw) {
+        val wifi = if (!protocol.isVehicle) {
             configuration ?: ReceiverWifi.fromStartSession(network, offset)
         } else {
             val advertised = if (layoutB) ReceiverWifi.fromConfiguration(network)
@@ -378,7 +401,7 @@ internal object Iap2LinkProbe {
             }
             configuration ?: advertised
         }
-        val host = if (protocol.isBmw) {
+        val host = if (protocol.isVehicle) {
             val alternateHosts = (alternatives + listOfNotNull(network[4], network[5], fields[7]))
                 .mapNotNull(::endpointText)
             val numericAddresses = (listOfNotNull(primaryHost) + alternateHosts).filter(::isNumericAddress)
@@ -391,7 +414,7 @@ internal object Iap2LinkProbe {
             ByteBuffer.wrap(it).int.takeIf { value -> value in 1..65535 }
                 ?: throw ProtocolException("Invalid CarPlay endpoint port")
         }
-        if ((host == null || port == null) && (!protocol.isBmw || wifi == null)) {
+        if ((host == null || port == null) && (!protocol.isVehicle || (wifi == null && protocol != ReceiverProtocol.VOLKSWAGEN))) {
             throw ProtocolException("Missing CarPlay endpoint address or port")
         }
         return Endpoint(host, port, certificate, wifi, protocol)
