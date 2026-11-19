@@ -49,6 +49,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.UUID
 import com.baidu.carlife.xiaomi.carplay.BluetoothReceiverProbe
+import com.baidu.carlife.xiaomi.carplay.HeadUnitProfile
 import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
 import com.baidu.carlife.xiaomi.carplay.ProjectionConnectionStatus
 import com.baidu.carlife.xiaomi.carplay.ProjectionLinkStatus
@@ -95,7 +96,13 @@ class CarlifeConnectService : Service() {
         }
         val deviceId = settings.address.takeIf(ReceiverSettings::validAddress)
             ?: ConnectionMode.automaticDeviceId(this)
-        val probe = BluetoothReceiverProbe(getSystemService(ConnectivityManager::class.java))
+        val probe = BluetoothReceiverProbe(
+            getSystemService(ConnectivityManager::class.java),
+            HeadUnitProfile.load(this),
+            getSystemService(android.net.nsd.NsdManager::class.java),
+            customPin = settings.pin.isNotEmpty(),
+            pairingDirectory = noBackupFilesDir,
+        )
         receiverProbe = probe
         val timeout = projectionScope.launch {
             delay(RECEIVER_CONNECT_TIMEOUT_MS)

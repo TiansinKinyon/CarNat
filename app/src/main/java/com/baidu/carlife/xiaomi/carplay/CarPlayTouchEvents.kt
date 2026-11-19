@@ -5,8 +5,10 @@ import android.view.KeyEvent
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.service.RemoteContact
 import com.dd.plist.BinaryPropertyListWriter
+import com.dd.plist.NSArray
 import com.dd.plist.NSData
 import com.dd.plist.NSDictionary
+import com.dd.plist.NSNumber
 import com.dd.plist.NSString
 import java.io.BufferedInputStream
 import java.io.DataInputStream
@@ -27,9 +29,42 @@ internal class CarPlayTouchEvents(
     private val certificate: java.security.cert.X509Certificate,
     private val onClosed: () -> Unit,
     private val onStage: (String) -> Unit,
+    private val onCommand: ((NSDictionary) -> Unit)? = null,
+    private val protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
 ) {
     private var contacts = emptyList<RemoteContact>()
     private var knobButtons = 0
+    private val eventOutput by lazy { CarPlayControlRecords.output(socket.getOutputStream(), keys.eventWrite()) }
+
+    fun configureMainDisplayHid(info: NSDictionary, displayId: String) {
+        val devices = (info.objectForKey("hidDevices") as? NSArray)?.array.orEmpty()
+        val ids = devices.asSequence().take(32).filterIsInstance<NSDictionary>().mapNotNull { device ->
+            val display = (device.objectForKey("displayUUID") as? NSString)?.content
+            if (display != null && !display.equals(displayId, ignoreCase = true)) return@mapNotNull null
+            when (val id = device.objectForKey("uuid")) {
+                is NSString -> id.takeIf { it.content.length in 1..128 }
+                is NSNumber -> id.takeIf { it.isInteger && it.longValue() >= 0 }
+                else -> null
+            }
+        }.distinct().toList()
+        ids.forEachIndexed { index, id ->
+            val command = NSDictionary().apply {
+                put("type", "hidSetInputMode")
+                put("params", NSDictionary().apply {
+                    put("uuid", id)
+                    put("hidInputMode", 0)
+                })
+            }
+            val body = BinaryPropertyListWriter.writeToArray(command)
+            val header = "POST /command RTSP/1.0\r\nCSeq: ${index + 1}\r\n" +
+                "Content-Type: application/x-apple-binary-plist\r\nContent-Length: ${body.size}\r\n\r\n"
+            synchronized(eventOutput) {
+                eventOutput.write(header.toByteArray(Charsets.US_ASCII))
+                eventOutput.write(body)
+                eventOutput.flush()
+            }
+        }
+    }
 
     fun start() {
         synchronized(inputOwnerLock) {
@@ -58,7 +93,7 @@ internal class CarPlayTouchEvents(
         val input = DataInputStream(BufferedInputStream(CarPlayControlRecords.input(
             socket.getInputStream(), keys.eventRead(),
         )))
-        val output = CarPlayControlRecords.output(socket.getOutputStream(), keys.eventWrite())
+        val output = eventOutput
         val incomingIap = PipedInputStream(IAP_BUFFER_BYTES)
         val iapWriter = PipedOutputStream(incomingIap)
         val outgoingIap = object : OutputStream() {
@@ -116,10 +151,21 @@ internal class CarPlayTouchEvents(
             val length = fields["content-length"]?.let { it.toIntOrNull() ?: throw ProtocolException("Invalid event length") } ?: 0
             if (length !in 0..65_536) throw ProtocolException("Invalid event length")
             val body = ByteArray(length).also(input::readFully)
-            if (start.startsWith("RTSP/1.0 ")) continue
-            val seq = fields["cseq"]?.toIntOrNull() ?: throw ProtocolException("Missing event CSeq")
-            if (start == "POST /command RTSP/1.0" && body.isNotEmpty()) {
-                val command = CarPlayPlist.readDictionary(body)
+            if (start.startsWith("RTSP/1.0 ") || (protocol.isBmw &&
+                    (start.startsWith("HTTP/1.0 ") || start.startsWith("HTTP/1.1 ")))
+            ) continue
+            val version = start.substringAfterLast(' ')
+            val isHttp = protocol.isBmw && (version == "HTTP/1.0" || version == "HTTP/1.1")
+            val seq = fields["cseq"]?.let {
+                it.toIntOrNull() ?: throw ProtocolException("Invalid event CSeq")
+            }
+            if (seq == null && !isHttp) throw ProtocolException("Missing event CSeq")
+            val command = if ((start == "POST /command RTSP/1.0" ||
+                    (isHttp && start == "POST /command $version")) && body.isNotEmpty()
+            ) {
+                CarPlayPlist.readDictionary(body)
+            } else null
+            if (command != null) {
                 val type = (command.objectForKey("type") as? NSString)?.content
                 val uuid = (command.objectForKey("uuid") as? NSString)?.content
                 if (type == "hidSendReport" && uuid.equals("2a2a2a2a", ignoreCase = true) && width > 0 && height > 0) {
@@ -138,9 +184,16 @@ internal class CarPlayTouchEvents(
                 }
             }
             synchronized(output) {
-                output.write("RTSP/1.0 200 OK\r\nCSeq: $seq\r\nContent-Length: 0\r\n\r\n".toByteArray(Charsets.US_ASCII))
+                val response = buildString {
+                    append(if (isHttp) version else "RTSP/1.0")
+                    append(" 200 OK\r\n")
+                    if (seq != null) append("CSeq: $seq\r\n")
+                    append("Content-Length: 0\r\n\r\n")
+                }
+                output.write(response.toByteArray(Charsets.US_ASCII))
                 output.flush()
             }
+            if (command != null) onCommand?.invoke(command)
         }
     }
 

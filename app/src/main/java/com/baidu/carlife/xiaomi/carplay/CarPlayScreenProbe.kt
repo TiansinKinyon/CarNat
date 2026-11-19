@@ -32,7 +32,7 @@ internal object CarPlayScreenProbe {
     fun run(
         host: InetAddress,
         control: RtspControl,
-        info: ByteArray,
+        info: ByteArray?,
         deviceId: String,
         keys: CarPlaySessionKeys,
         certificate: java.security.cert.X509Certificate,
@@ -42,13 +42,24 @@ internal object CarPlayScreenProbe {
         preferences: ProjectionPreferences,
         onAudio: (Boolean, CarPlayAudioInfo) -> Unit,
         onStage: (String) -> Unit,
+        protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
+        readResolutionOnly: Boolean = false,
     ): String = CarPlayTiming(host, sockets.openDatagram()).use { timing ->
         require(bluetoothAddress.matches(deviceId))
-        val receiverInfo = parse(info)
-        val display = CarPlayDisplay.fromReceiverInfo(receiverInfo)
-        val resolution = display.resolution
-        onResolution(resolution)
-        ProjectionLog.event("车机主屏参数 · ${resolution.width}×${resolution.height}/${resolution.frameRate} fps")
+        val sessionUuid = UUID.randomUUID()
+        val sessionTarget = if (protocol.isBmw) {
+            val address = host.hostAddress ?: throw ProtocolException("连接缺少车机地址")
+            val authority = if (':' in address) "[${address.replace("%", "%25")}]" else address
+            "rtsp://$authority/${sessionUuid.mostSignificantBits.toULong()}"
+        } else "/"
+        fun record() {
+            if (protocol.isBmw) {
+                val reply = control.request("RECORD", sessionTarget, plistHeaders)
+                BmwScreenResources.requireAcknowledgement("RECORD", reply)
+            } else {
+                request(control, "RECORD", "/", NSDictionary())
+            }
+        }
 
         onStage("正在建立 CarPlay 会话")
         val session = NSDictionary().apply {
@@ -60,58 +71,113 @@ internal object CarPlayScreenProbe {
             put("osName", "Android")
             put("osVersion", Build.VERSION.RELEASE)
             put("sourceVersion", "540.31")
-            put("sessionUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
+            put("sessionUUID", sessionUuid.toString().uppercase(Locale.ROOT))
+            if (protocol.isBmw) put("macAddress", deviceId.uppercase(Locale.ROOT))
             put("sessionCorrelationUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
         }
-        val sessionReply = parse(request(control, "SETUP", "/setup", session))
+        fun readDisplay(receiverInfo: NSDictionary): CarPlayDisplay =
+            CarPlayDisplay.fromReceiverInfo(receiverInfo, protocol).also { display ->
+                val resolution = display.resolution
+                onResolution(resolution)
+                ProjectionLog.event("车机主屏参数 · ${resolution.width}×${resolution.height}/${resolution.frameRate} fps")
+            }
+
+        val previousInfo = info?.let(::parse)
+        val previousDisplay = if (protocol.isBmw) null else readDisplay(checkNotNull(previousInfo))
+        val sessionReply = parse(request(control, "SETUP", if (protocol.isBmw) sessionTarget else "/setup", session))
+        val currentInfo = if (protocol.isBmw) CarPlayReceiverProbe.readInfo(control, protocol, required = false) else null
+        val receiverInfo = currentInfo?.let(::parse) ?: previousInfo ?: throw ProtocolException("车机未提供会话显示信息")
+        val display = previousDisplay ?: readDisplay(receiverInfo)
+        val resolution = display.resolution
+        if (readResolutionOnly) {
+            if (protocol.isBmw) {
+                try {
+                    control.request("TEARDOWN", sessionTarget, plistHeaders)
+                } catch (failure: IOException) {
+                    ProjectionLog.failure("宝马分辨率探测结束时车机已断开", failure)
+                }
+            }
+            return "已读取车机主屏分辨率"
+        }
         val eventPort = port(sessionReply, "eventPort")
         val keepAlivePort = (sessionReply.objectForKey("keepAlivePort") as? NSNumber)
             ?.takeIf { it.isInteger }?.longValue()?.takeIf { it in 1L..65_535L }?.toInt()
         connect(sockets, host, eventPort).use { events ->
-            CarPlayTouchEvents(
+            val resources = if (protocol.isBmw) BmwScreenResources(receiverInfo, protocol, sockets::close) else null
+            val eventChannel = CarPlayTouchEvents(
                 events, keys, control, resolution.width, resolution.height, certificate,
-                sockets::close, onStage,
-            ).start()
-            onStage("事件通道已连接，正在协商主屏视频")
-            val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
-            val stream = NSDictionary().apply {
-                put("type", MAIN_SCREEN)
-                put("streamConnectionID", connectionId)
-                put("uuid", display.uuid)
-                put("latencyMs", 25)
-            }
-            val request = NSDictionary().apply {
-                put("streams", NSArray(1).apply { setValue(0, stream) })
-            }
-            val reply = parse(request(control, "SETUP", "/", request))
-            val streams = reply.objectForKey("streams") as? NSArray
-            val screen = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
-                (it.objectForKey("type") as? NSNumber)?.longValue() == MAIN_SCREEN.toLong()
-            } ?: throw ProtocolException("接收端未返回主屏流")
-            val dataPort = port(screen, "dataPort")
-            connect(sockets, host, dataPort).use { video ->
-                openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = false).use { audio ->
-                    openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = true).use { navigation ->
-                        val microphone = if (preferences.useCarMicrophone) {
-                            CarPlayMicrophone.open(receiverInfo, control, keys, sockets, host)
-                        } else null
-                        microphone.use {
-                            request(control, "RECORD", "/", NSDictionary())
-                            microphone?.start()
-                            audio?.start()
-                            navigation?.start()
-                            val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
-                            if (!CarlifeConnectService.state.value.active) return connected
-                            onStage(connected)
-                            val heartbeat = startHeartbeat(control, sockets, video, host, keepAlivePort)
-                            try {
-                                return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
-                            } finally {
-                                heartbeat.interrupt()
+                sockets::close, onStage, resources?.let { state -> state::onCommand }, protocol,
+            )
+            eventChannel.start()
+            val heartbeat = if (protocol.isBmw) startHeartbeat(control, sockets, events, host, keepAlivePort) else null
+            try {
+                if (protocol == ReceiverProtocol.BMW_MGU) record()
+                resources?.declareAndClaim(control)
+                resources?.requireScreen()
+                if (protocol == ReceiverProtocol.BMW_ID9) {
+                    eventChannel.configureMainDisplayHid(receiverInfo, display.uuid)
+                }
+
+                onStage("事件通道已连接，正在协商主屏视频")
+                val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
+                val stream = NSDictionary().apply {
+                    put("type", MAIN_SCREEN)
+                    put("streamConnectionID", connectionId)
+                    put("uuid", display.uuid)
+                    put("latencyMs", if (protocol == ReceiverProtocol.BMW_MGU) 75 else 25)
+                }
+                val request = NSDictionary().apply {
+                    put("streams", NSArray(1).apply { setValue(0, stream) })
+                }
+                val reply = if (protocol == ReceiverProtocol.BMW_MGU && resources != null) {
+                    val body = BinaryPropertyListWriter.writeToArray(request)
+                    val first = control.request("SETUP", sessionTarget, plistHeaders, body)
+                    val response = if (first.status == 400 && resources.awaitUiRequest()) {
+                        resources.requireScreen()
+                        control.request("SETUP", sessionTarget, plistHeaders, body)
+                    } else first
+                    if (response.status !in 200..299) {
+                        throw ProtocolException("主屏 SETUP 失败（RTSP ${response.status}）")
+                    }
+                    parse(response.body)
+                } else {
+                    parse(request(control, "SETUP", sessionTarget, request))
+                }
+                val streams = reply.objectForKey("streams") as? NSArray
+                val screen = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
+                    (it.objectForKey("type") as? NSNumber)?.longValue() == MAIN_SCREEN.toLong()
+                } ?: throw ProtocolException("接收端未返回主屏流")
+                val dataPort = port(screen, "dataPort")
+                connect(sockets, host, dataPort).use { video ->
+                    resources?.startScreen()
+                    if (protocol == ReceiverProtocol.BMW_ID9) record()
+                    openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = false).use { audio ->
+                        openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = true).use { navigation ->
+                            val microphone = if (preferences.useCarMicrophone) {
+                                CarPlayMicrophone.open(receiverInfo, control, keys, sockets, host)
+                            } else null
+                            microphone.use {
+                                if (!protocol.isBmw) record()
+                                microphone?.start()
+                                audio?.start()
+                                navigation?.start()
+                                val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
+                                if (!CarlifeConnectService.state.value.active) return connected
+                                onStage(connected)
+                                val videoHeartbeat = if (heartbeat == null) {
+                                    startHeartbeat(control, sockets, video, host, keepAlivePort)
+                                } else null
+                                try {
+                                    return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                                } finally {
+                                    videoHeartbeat?.interrupt()
+                                }
                             }
                         }
                     }
                 }
+            } finally {
+                heartbeat?.interrupt()
             }
         }
     }

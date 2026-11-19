@@ -11,7 +11,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 internal object MfiSap {
-    fun verify(control: RtspControl, bluetoothCertificate: X509Certificate) {
+    fun verify(control: RtspControl, bluetoothCertificate: X509Certificate, allowUnsupported: Boolean = false): Boolean {
         val ephemeral = PairingCrypto.ephemeralKey()
         val localPublic = ephemeral.generatePublicKey().encoded
         val reply = control.request(
@@ -20,6 +20,7 @@ internal object MfiSap {
             mapOf("Content-Type" to "application/octet-stream"),
             byteArrayOf(1) + localPublic,
         )
+        if (allowUnsupported && (reply.status == 404 || reply.status == 501)) return false
         if (reply.status !in 200..299) throw ProtocolException("MFi-SAP rejected by receiver (RTSP ${reply.status})")
         val body = ByteBuffer.wrap(reply.body)
         if (body.remaining() < 40) throw ProtocolException("Truncated MFi-SAP response")
@@ -51,6 +52,7 @@ internal object MfiSap {
         if (!MfiChallenge.verify(leaf.publicKey, transcript, signature)) {
             throw ProtocolException("MFi-SAP signature did not match the authenticated receiver")
         }
+        return true
     }
 
     private fun legacyKey(label: String, shared: ByteArray): ByteArray =

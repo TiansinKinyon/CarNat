@@ -63,6 +63,7 @@ import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AudioPreference
 import com.baidu.carlife.xiaomi.carplay.CarPlayMicrophone
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
+import com.baidu.carlife.xiaomi.carplay.HeadUnitProfile
 import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.ui.MicrophoneLevelMeter
@@ -92,6 +93,8 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
     val editable = active && !capture.active
     var connectionMode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
     var showConnectionMode by remember { mutableStateOf(false) }
+    var headUnitProfile by remember(context) { mutableStateOf(HeadUnitProfile.load(context)) }
+    var showHeadUnitProfile by remember { mutableStateOf(false) }
     var showMicrophone by remember { mutableStateOf(false) }
 
     fun save(updated: ProjectionPreferences) {
@@ -108,7 +111,10 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             SettingsRow("连接方式", connectionMode.label, active, capture.active, leadingIcon = {
                 Icon(painterResource(R.drawable.ic_connect), contentDescription = null)
             }) { showConnectionMode = true }
-
+            SettingsDivider()
+            SettingsRow("车机品牌", headUnitProfile.label, active, capture.active, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_car_gear), contentDescription = null)
+            }) { showHeadUnitProfile = true }
         }
         SettingsCard {
             SettingsRow(Editor.RESOLUTION.title, preferences.width?.let { "$it × ${preferences.height}" } ?: "跟随车机", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_aspect_ratio), contentDescription = null) }) {
@@ -167,6 +173,33 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             connectionMode = mode
             showConnectionMode = false
         }
+    }
+    if (showHeadUnitProfile && editable) {
+        AlertDialog(
+            onDismissRequest = { showHeadUnitProfile = false },
+            title = { Text("车机品牌") },
+            text = {
+                Column(Modifier.selectableGroup()) {
+                    HeadUnitProfile.entries.forEach { profile ->
+                        val selected = profile == headUnitProfile
+                        ListItem(
+                            headlineContent = { Text(profile.label) },
+                            supportingContent = { Text(profile.summary) },
+                            leadingContent = { RadioButton(selected = selected, onClick = null) },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.selectable(selected, role = Role.RadioButton) {
+                                profile.save(context)
+                                headUnitProfile = profile
+                                showHeadUnitProfile = false
+                            },
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showHeadUnitProfile = false }) { Text("关闭") }
+            },
+        )
     }
     if (showMicrophone && active) {
         MicrophoneDialog(

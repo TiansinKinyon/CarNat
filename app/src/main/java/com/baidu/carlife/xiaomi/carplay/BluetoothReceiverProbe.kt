@@ -6,12 +6,18 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.nsd.NsdManager
 import android.os.Build
 import android.os.SystemClock
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import java.io.Closeable
 import java.io.IOException
+import java.io.File
+import java.net.ProtocolException
 import java.util.UUID
 
 internal data class ReceiverDiagnostics(
@@ -38,10 +44,15 @@ internal data class CarPlayAudioInfo(
 
 internal class BluetoothReceiverProbe(
     private val connectivity: ConnectivityManager,
+    private val profile: HeadUnitProfile = HeadUnitProfile.GENERIC,
+    private val discovery: NsdManager? = null,
+    private val customPin: Boolean = false,
+    private val pairingDirectory: File? = null,
 ) : Closeable {
     private var wifiRequest: Closeable? = null
     private var sockets: CarPlaySockets? = null
     private var server: BluetoothServerSocket? = null
+    private var discoveryMarker: BluetoothServerSocket? = null
     private var peer: BluetoothSocket? = null
     @Volatile private var closed = false
 
@@ -62,6 +73,7 @@ internal class BluetoothReceiverProbe(
     ) {
         try {
             var reconnectUntil = 0L
+            val firstConnectionDeadline = SystemClock.elapsedRealtime() + 85_000L
             var attemptNumber = 0
             while (!closed) {
                 var streamed = false
@@ -70,14 +82,23 @@ internal class BluetoothReceiverProbe(
                 val mode = if (readResolutionOnly) "预连接" else "正式连接"
                 ProjectionLog.event("CarPlay $mode · 尝试 $attemptNumber")
                 try {
-                    val acceptTimeout = if (reconnectUntil == 0L) 30_000 else
-                        (reconnectUntil - SystemClock.elapsedRealtime()).coerceIn(1L, 30_000L).toInt()
+                    val acceptDeadline = when {
+                        reconnectUntil != 0L -> reconnectUntil
+                        profile == HeadUnitProfile.BMW -> firstConnectionDeadline
+                        else -> started + 30_000L
+                    }
+                    val acceptTimeout = (acceptDeadline - started).coerceIn(1L, 30_000L).toInt()
                     runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, receiverAddress, {
                         streamed = true
                         onStreamStarted()
                     }, onResolution, onDiagnostics, readResolutionOnly, preferences, onStage)
                 } catch (error: IOException) {
                     if (closed) return
+                    val windowDeadline = if (reconnectUntil != 0L) reconnectUntil else firstConnectionDeadline
+                    if (error is BmwWindowPending && SystemClock.elapsedRealtime() < windowDeadline) {
+                        onStage("已完成宝马蓝牙认证 · 等待 CarPlay 链路")
+                        continue
+                    }
                     ProjectionLog.failure("CarPlay $mode · 尝试 $attemptNumber · 首帧=$streamed", error)
                     if (!retryAfterDisconnect || !captureReady() ||
                         (!streamed && SystemClock.elapsedRealtime() >= reconnectUntil)
@@ -117,7 +138,19 @@ internal class BluetoothReceiverProbe(
         val listener = synchronized(this) {
             if (closed) throw IOException("蓝牙连接已停止")
             sockets = attempt
-            adapter.listenUsingRfcommWithServiceRecord("CarPlay", SERVICE_UUID).also { server = it }
+            val name = if (profile == HeadUnitProfile.BMW) "Wireless iAP" else "CarPlay"
+            adapter.listenUsingRfcommWithServiceRecord(name, SERVICE_UUID).also { listener ->
+                server = listener
+                if (profile == HeadUnitProfile.BMW) {
+                    discoveryMarker = try {
+                        adapter.listenUsingRfcommWithServiceRecord("CarPlay Discovery", BMW_DISCOVERY_UUID)
+                    } catch (_: IOException) {
+                        null
+                    } catch (_: SecurityException) {
+                        null
+                    }
+                }
+            }
         }
         onStage(if (receiverName.isBlank()) "正在等待已配对车机连接" else "正在等待配对设备 $receiverName 连接")
         ProjectionLog.event("蓝牙 RFCOMM · 监听窗口=${acceptTimeout}ms")
@@ -165,21 +198,51 @@ internal class BluetoothReceiverProbe(
                 accessPoint = request
             }
         }
-        val endpoint = Iap2LinkProbe.run(connection.inputStream, connection.outputStream, { wifi ->
-            publishWifi(wifi)
-            requestWifi(wifi)
-        }, onStage)
+        val awaitingEndpoint = java.util.concurrent.atomic.AtomicBoolean(true)
+        val timeout = Runnable {
+            if (awaitingEndpoint.getAndSet(false)) runCatching { connection.close() }
+        }
+        val timer = android.os.Handler(android.os.Looper.getMainLooper())
+        timer.postDelayed(timeout, 45_000)
+        var waitingForBmwWindow = false
+        val endpoint = try {
+            Iap2LinkProbe.run(
+                connection.inputStream, connection.outputStream,
+                onWifi = { wifi ->
+                    publishWifi(wifi)
+                    requestWifi(wifi)
+                },
+                profile = profile,
+                deviceId = deviceId,
+                onBmwAppsWindow = { waitingForBmwWindow = it },
+                onStage = onStage,
+            )
+        } catch (failure: IOException) {
+            if (waitingForBmwWindow && failure !is ProtocolException) throw BmwWindowPending(failure)
+            throw failure
+        } finally {
+            awaitingEndpoint.set(false)
+            timer.removeCallbacks(timeout)
+        }
         endpoint.wifi?.let(::publishWifi)
-        val addressKind = if (':' in endpoint.host) "IPv6"
-            else if (endpoint.host.all { it.isDigit() || it == '.' }) "IPv4" else "主机名"
+        val addressKind = when {
+            endpoint.host == null -> "需要网络发现"
+            ':' in endpoint.host -> "IPv6"
+            endpoint.host.all { it.isDigit() || it == '.' } -> "IPv4"
+            else -> "主机名"
+        }
         ProjectionLog.event("iAP2 · 网络端点类型=$addressKind · 提供热点配置=${endpoint.wifi != null}")
         diagnostics = diagnostics.copy(host = endpoint.host, port = endpoint.port)
         onDiagnostics(diagnostics)
         if (pin.isNotEmpty()) {
             endpoint.wifi?.let(::requestWifi)
+            var vehicleNetwork: Network? = null
+            var vehicleLink: LinkProperties? = null
             if (Build.VERSION.SDK_INT >= 29) accessPoint?.let { request ->
                 val network = request.awaitNetwork()
                 val link = connectivity.getLinkProperties(network)
+                vehicleNetwork = network
+                vehicleLink = link
                 attempt.useNetwork(network, link?.interfaceName)
                 diagnostics = diagnostics.copy(
                     wifiInterface = link?.interfaceName,
@@ -189,8 +252,25 @@ internal class BluetoothReceiverProbe(
                 ProjectionLog.event("Wi-Fi · 已绑定车机网络 · 可用本机 IP 数=${diagnostics.phoneIps.size}")
                 onStage("已连接车机 Wi-Fi")
             }
+            val address = if (endpoint.host != null && endpoint.port != null) {
+                if (endpoint.protocol.isBmw && vehicleNetwork == null) {
+                    val current = connectivity.activeNetwork
+                    val isWifi = current?.let(connectivity::getNetworkCapabilities)
+                        ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                    if (current == null || !isWifi) throw IOException("请先连接车机 Wi-Fi")
+                    attempt.useNetwork(current, connectivity.getLinkProperties(current)?.interfaceName)
+                }
+                endpoint.host to endpoint.port
+            } else {
+                val network = vehicleNetwork ?: throw IOException("车机未提供端点，且没有已绑定的车机热点")
+                val link = vehicleLink ?: throw IOException("无法读取车机热点地址")
+                onStage("正在发现宝马 AirPlay 服务")
+                BmwAirPlayDiscovery.find(discovery, network, link)
+            }
+            diagnostics = diagnostics.copy(host = address.first, port = address.second)
+            onDiagnostics(diagnostics)
             onStage(CarPlayReceiverProbe.verify(
-                endpoint.host, endpoint.port, pin, endpoint.certificate, deviceId, attempt, onStreamStarted,
+                address.first, address.second, pin, endpoint.certificate, deviceId, attempt, onStreamStarted,
                 onResolution = { resolution ->
                     diagnostics = diagnostics.copy(resolution = resolution)
                     onDiagnostics(diagnostics)
@@ -203,9 +283,16 @@ internal class BluetoothReceiverProbe(
                     onDiagnostics(diagnostics)
                 },
                 onStage = onStage,
+                protocol = endpoint.protocol,
+                customPin = customPin,
+                pairingStore = pairingDirectory?.takeIf { endpoint.protocol.isBmw }?.let {
+                    BmwPairingStore(it, deviceId, device.address, endpoint.certificate)
+                },
             ))
         }
     }
+
+    private class BmwWindowPending(cause: IOException) : IOException("宝马暂未开启 CarPlay", cause)
 
     private fun captureReady() = CarlifeConnectService.state.value.displayId != null &&
         CarlifeConnectService.state.value.active
@@ -216,6 +303,8 @@ internal class BluetoothReceiverProbe(
         runCatching { wifiRequest?.close() }
         wifiRequest = null
         runCatching { peer?.close() }
+        runCatching { discoveryMarker?.close() }
+        discoveryMarker = null
         runCatching { server?.close() }
         sockets = null
         peer = null
@@ -229,6 +318,7 @@ internal class BluetoothReceiverProbe(
     }
 
     private companion object {
+        private val BMW_DISCOVERY_UUID = UUID.fromString("02030302-1d19-415f-86f2-22a2106a0a77")
         val SERVICE_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacafe")
     }
 }
