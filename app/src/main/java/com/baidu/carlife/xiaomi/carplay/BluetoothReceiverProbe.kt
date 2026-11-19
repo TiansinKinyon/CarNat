@@ -47,7 +47,6 @@ internal class BluetoothReceiverProbe(
     private val connectivity: ConnectivityManager,
     private val profile: HeadUnitProfile = HeadUnitProfile.GENERIC,
     private val discovery: NsdManager? = null,
-    private val customPin: Boolean = false,
     private val pairingDirectory: File? = null,
     private val hasConfiguredPhoneAddress: Boolean = false,
 ) : Closeable {
@@ -340,7 +339,6 @@ internal class BluetoothReceiverProbe(
                 },
                 onStage = onStage,
                 protocol = endpoint.protocol,
-                customPin = customPin,
                 beforeHandshake = { host -> invitation?.requireFresh(host, consume = true) },
                 pairingStore = pairingDirectory?.takeIf { endpoint.protocol.isVehicle }?.let {
                     VehiclePairingStore(it, deviceId, device.address, endpoint.certificate, endpoint.protocol)

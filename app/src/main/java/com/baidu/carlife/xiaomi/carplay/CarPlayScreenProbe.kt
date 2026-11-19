@@ -104,19 +104,15 @@ internal object CarPlayScreenProbe {
             ?.takeIf { it.isInteger }?.longValue()?.takeIf { it in 1L..65_535L }?.toInt()
         connect(sockets, host, eventPort).use { events ->
             val resources = if (protocol.isVehicle) VehicleScreenResources(receiverInfo, protocol, sockets::close) else null
-            val eventChannel = CarPlayTouchEvents(
+            CarPlayTouchEvents(
                 events, keys, control, resolution.width, resolution.height, certificate,
                 sockets::close, onStage, resources?.let { state -> state::onCommand }, protocol,
-            )
-            eventChannel.start()
+            ).start()
             val heartbeat = if (protocol.isVehicle) startHeartbeat(control, sockets, events, host, keepAlivePort) else null
             try {
                 if (protocol == ReceiverProtocol.BMW_MGU || protocol == ReceiverProtocol.VOLKSWAGEN) record()
                 resources?.declareAndClaim(control)
                 resources?.requireScreen()
-                if (protocol == ReceiverProtocol.BMW_ID9) {
-                    eventChannel.configureMainDisplayHid(receiverInfo, display.uuid)
-                }
 
                 onStage("事件通道已连接，正在协商主屏视频")
                 val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
@@ -150,7 +146,6 @@ internal object CarPlayScreenProbe {
                 val dataPort = port(screen, "dataPort")
                 connect(sockets, host, dataPort).use { video ->
                     resources?.startScreen()
-                    if (protocol == ReceiverProtocol.BMW_ID9) record()
                     openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = false).use { audio ->
                         openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = true).use { navigation ->
                             val microphone = if (preferences.useCarMicrophone) {

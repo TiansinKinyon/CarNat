@@ -16,11 +16,10 @@ import org.junit.Test
 
 class HeadUnitProtocolTest {
     @Test
-    fun bmwSeparatesMguFromIdc23AndGenericIgnoresModel() {
-        assertEquals(ReceiverProtocol.GENERIC, HeadUnitProfile.GENERIC.protocol("IDC23"))
-        assertEquals(ReceiverProtocol.BMW_MGU, HeadUnitProfile.BMW.protocol("MGU-55-BMW"))
-        assertEquals(ReceiverProtocol.BMW_MGU, HeadUnitProfile.BMW.protocol("MGU-86-BMW"))
-        assertEquals(ReceiverProtocol.BMW_ID9, HeadUnitProfile.BMW.protocol("idc23"))
+    fun bmwUsesOnlyTheMguProfile() {
+        assertEquals(ReceiverProtocol.BMW_MGU, HeadUnitProfile.BMW.protocol)
+        assertEquals(ReceiverProtocol.GENERIC, HeadUnitProfile.GENERIC.protocol)
+        assertEquals(ReceiverProtocol.VOLKSWAGEN, HeadUnitProfile.VOLKSWAGEN.protocol)
     }
 
     @Test
@@ -53,8 +52,6 @@ class HeadUnitProtocolTest {
 
     @Test
     fun volkswagenKeepsItsOwnProtocolAndAcceptsOnlyConnectInvitations() {
-        assertEquals(ReceiverProtocol.VOLKSWAGEN, HeadUnitProfile.VOLKSWAGEN.protocol("VW4131"))
-        assertEquals(ReceiverProtocol.VOLKSWAGEN, HeadUnitProfile.VOLKSWAGEN.protocol("IDC23"))
         assertFalse(ReceiverProtocol.VOLKSWAGEN.isBmw)
         assertTrue(VolkswagenInvitation.isConnectRequest("GET /ctrl-int/1/connect?version=1 HTTP/1.1"))
         assertFalse(VolkswagenInvitation.isConnectRequest("POST /ctrl-int/1/connect HTTP/1.1"))

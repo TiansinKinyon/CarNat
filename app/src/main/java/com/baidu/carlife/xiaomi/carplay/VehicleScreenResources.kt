@@ -21,19 +21,18 @@ internal class VehicleScreenResources(
     private val modes = info.objectForKey("modes") as? NSDictionary
     private val initialScreen = resources(modes, "initialPermanentEntity", id = 1).lastOrNull()
     private val initialTransfer = resources(modes, "resources", id = 1).lastOrNull()
-    private val defaultOwner = if (protocol == ReceiverProtocol.BMW_ID9) 2 else 1
     private val takeConstraint = if (initialTransfer?.number("transferType") == 3) {
         initialTransfer.number("unborrowConstraint") ?: 100
     } else {
         initialTransfer?.number("takeConstraint") ?: initialScreen?.number("takeConstraint") ?: 100
     }
     private var permanent = if (initialTransfer?.number("transferType") == 1) 2
-        else initialScreen?.number("permanentEntity")?.takeIf { it in 1..2 } ?: defaultOwner
+        else initialScreen?.number("permanentEntity")?.takeIf { it in 1..2 } ?: 1
     private var owner = if (initialTransfer?.number("transferType") == 3) 2 else permanent
     private val initialAudio = resources(modes, "initialPermanentEntity", id = 2).lastOrNull()
     private val audioTransfer = resources(modes, "resources", id = 2).lastOrNull()
     private val audioPermanent = if (audioTransfer?.number("transferType") == 1) 2
-        else initialAudio?.number("permanentEntity")?.takeIf { it in 1..2 } ?: defaultOwner
+        else initialAudio?.number("permanentEntity")?.takeIf { it in 1..2 } ?: 1
     private val audioOwner = if (audioTransfer?.number("transferType") == 3) 2 else audioPermanent
     private var revoked = false
     private var streaming = false

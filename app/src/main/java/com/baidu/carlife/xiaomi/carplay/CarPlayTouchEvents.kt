@@ -5,10 +5,8 @@ import android.view.KeyEvent
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.service.RemoteContact
 import com.dd.plist.BinaryPropertyListWriter
-import com.dd.plist.NSArray
 import com.dd.plist.NSData
 import com.dd.plist.NSDictionary
-import com.dd.plist.NSNumber
 import com.dd.plist.NSString
 import java.io.BufferedInputStream
 import java.io.DataInputStream
@@ -34,37 +32,6 @@ internal class CarPlayTouchEvents(
 ) {
     private var contacts = emptyList<RemoteContact>()
     private var knobButtons = 0
-    private val eventOutput by lazy { CarPlayControlRecords.output(socket.getOutputStream(), keys.eventWrite()) }
-
-    fun configureMainDisplayHid(info: NSDictionary, displayId: String) {
-        val devices = (info.objectForKey("hidDevices") as? NSArray)?.array.orEmpty()
-        val ids = devices.asSequence().take(32).filterIsInstance<NSDictionary>().mapNotNull { device ->
-            val display = (device.objectForKey("displayUUID") as? NSString)?.content
-            if (display != null && !display.equals(displayId, ignoreCase = true)) return@mapNotNull null
-            when (val id = device.objectForKey("uuid")) {
-                is NSString -> id.takeIf { it.content.length in 1..128 }
-                is NSNumber -> id.takeIf { it.isInteger && it.longValue() >= 0 }
-                else -> null
-            }
-        }.distinct().toList()
-        ids.forEachIndexed { index, id ->
-            val command = NSDictionary().apply {
-                put("type", "hidSetInputMode")
-                put("params", NSDictionary().apply {
-                    put("uuid", id)
-                    put("hidInputMode", 0)
-                })
-            }
-            val body = BinaryPropertyListWriter.writeToArray(command)
-            val header = "POST /command RTSP/1.0\r\nCSeq: ${index + 1}\r\n" +
-                "Content-Type: application/x-apple-binary-plist\r\nContent-Length: ${body.size}\r\n\r\n"
-            synchronized(eventOutput) {
-                eventOutput.write(header.toByteArray(Charsets.US_ASCII))
-                eventOutput.write(body)
-                eventOutput.flush()
-            }
-        }
-    }
 
     fun start() {
         synchronized(inputOwnerLock) {
@@ -93,7 +60,7 @@ internal class CarPlayTouchEvents(
         val input = DataInputStream(BufferedInputStream(CarPlayControlRecords.input(
             socket.getInputStream(), keys.eventRead(),
         )))
-        val output = eventOutput
+        val output = CarPlayControlRecords.output(socket.getOutputStream(), keys.eventWrite())
         val incomingIap = PipedInputStream(IAP_BUFFER_BYTES)
         val iapWriter = PipedOutputStream(incomingIap)
         val outgoingIap = object : OutputStream() {

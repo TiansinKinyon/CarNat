@@ -86,7 +86,9 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val status by CarlifeConnectService.state.collectAsState()
     var mode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
     var autoNeedsPermissions by remember { mutableStateOf(missingReceiverPermissions(context).isNotEmpty()) }
-    val volkswagen = HeadUnitProfile.load(context) == HeadUnitProfile.VOLKSWAGEN
+    val headUnitProfile by remember(context) { HeadUnitProfile.observe(context) }
+        .collectAsState(initial = HeadUnitProfile.load(context))
+    val volkswagen = headUnitProfile == HeadUnitProfile.VOLKSWAGEN
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
     var phoneAddress by rememberSaveable { mutableStateOf(settings.address.uppercase(Locale.ROOT)) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -154,6 +156,15 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         onOpenDeviceInfo = { openDeviceInfoSettings(context) },
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
+        brandPicker = {
+            HeadUnitPicker(headUnitProfile, active && !status.active) { profile ->
+                if (!CarlifeConnectService.state.value.active) {
+                    profile.save(context)
+                    error = null
+                    expanded = false
+                }
+            }
+        },
         receiverPicker = {
             val selectedName = settings.name.takeIf { settings.receiverAddress.isNotEmpty() }.orEmpty()
             ReceiverPicker(
@@ -211,6 +222,7 @@ private fun ProjectionContent(
     onOpenDeviceInfo: () -> Unit,
     error: String?,
     supported: Boolean,
+    brandPicker: @Composable () -> Unit,
     receiverPicker: @Composable () -> Unit,
     onProjectionClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -289,6 +301,7 @@ private fun ProjectionContent(
                         }
                     }
                 }
+                brandPicker()
                 receiverPicker()
                 OutlinedTextField(
                     leadingIcon = { Icon(painterResource(R.drawable.ic_settings_bluetooth), contentDescription = null) },
@@ -520,6 +533,7 @@ private fun ProjectionPreviewContent(status: CaptureStatus, manual: Boolean = tr
         onOpenDeviceInfo = {},
         error = null,
         supported = true,
+        brandPicker = { HeadUnitPicker(HeadUnitProfile.GENERIC, !status.active) {} },
         receiverPicker = {
             ReceiverPicker(
                 selectedName = "CarPlay 接收端",
@@ -548,6 +562,53 @@ private fun pairedReceivers(context: Context): List<PairedReceiver>? = try {
     }.sortedWith(compareBy({ it.name }, { it.address }))
 } catch (_: SecurityException) {
     null
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HeadUnitPicker(
+    selected: HeadUnitProfile,
+    enabled: Boolean,
+    onSelect: (HeadUnitProfile) -> Unit,
+) {
+    var expanded by remember(enabled) { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { if (enabled) expanded = it },
+    ) {
+        OutlinedTextField(
+            value = selected.label,
+            onValueChange = {},
+            enabled = enabled,
+            readOnly = true,
+            singleLine = true,
+            leadingIcon = { Icon(painterResource(R.drawable.ic_car_gear), contentDescription = null) },
+            label = { Text("车机品牌") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled).fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ) {
+            HeadUnitProfile.entries.forEach { profile ->
+                DropdownMenuItem(
+                    text = { Text(profile.label) },
+                    trailingIcon = {
+                        if (profile == selected) {
+                            Icon(painterResource(R.drawable.ic_check_circle), contentDescription = "当前选中")
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(profile)
+                    },
+                )
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

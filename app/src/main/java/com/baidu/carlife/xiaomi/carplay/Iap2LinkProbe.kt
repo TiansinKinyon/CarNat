@@ -60,7 +60,7 @@ internal object Iap2LinkProbe {
         var leaf: X509Certificate? = null
         var authenticated = false
         var requestWifi = false
-        var protocol = ReceiverProtocol.GENERIC
+        val protocol = profile.protocol
         var declaresAvailability = false
         var declaresWifiConfiguration = false
         var declaresStartSession = false
@@ -251,7 +251,6 @@ internal object Iap2LinkProbe {
                                 onStage("已收到 iAP2 接收端身份：${receiverIdentity(message)}")
                                 val identity = parameters(message, repeatableFields = identificationGroups)
                                 model = identity[1]?.toString(Charsets.UTF_8)?.substringBefore('\u0000').orEmpty()
-                                protocol = profile.protocol(model)
                                 readCapabilities(identity)
                                 sendControl(0x1d02)
                                 val askForSerial = protocol.isVehicle && containsMessage(identity[6], 0xaa06)
@@ -306,7 +305,6 @@ internal object Iap2LinkProbe {
                                             if (bmwAppsOnly) onStage("宝马控制链路已认证 · 等待车机开启 CarPlay")
                                             else startMguWifi()
                                         }
-                                        ReceiverProtocol.BMW_ID9 -> sendAvailability()
                                         ReceiverProtocol.VOLKSWAGEN -> {
                                             sendAvailability()
                                             if (requestWifi || declaresWifiConfiguration) sendControl(0x5702)

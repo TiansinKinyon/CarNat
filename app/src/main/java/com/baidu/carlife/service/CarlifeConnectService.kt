@@ -101,7 +101,6 @@ class CarlifeConnectService : Service() {
             getSystemService(ConnectivityManager::class.java),
             headUnit,
             getSystemService(android.net.nsd.NsdManager::class.java),
-            customPin = settings.pin.isNotEmpty(),
             pairingDirectory = noBackupFilesDir,
             hasConfiguredPhoneAddress = ReceiverSettings.validAddress(settings.address),
         )

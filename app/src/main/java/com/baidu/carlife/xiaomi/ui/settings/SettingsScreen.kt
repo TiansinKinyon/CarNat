@@ -93,7 +93,8 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
     val editable = active && !capture.active
     var connectionMode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
     var showConnectionMode by remember { mutableStateOf(false) }
-    var headUnitProfile by remember(context) { mutableStateOf(HeadUnitProfile.load(context)) }
+    val headUnitProfile by remember(context) { HeadUnitProfile.observe(context) }
+        .collectAsStateWithLifecycle(initialValue = HeadUnitProfile.load(context))
     var showHeadUnitProfile by remember { mutableStateOf(false) }
     var showMicrophone by remember { mutableStateOf(false) }
 
@@ -189,7 +190,6 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
                             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                             modifier = Modifier.selectable(selected, role = Role.RadioButton) {
                                 profile.save(context)
-                                headUnitProfile = profile
                                 showHeadUnitProfile = false
                             },
                         )

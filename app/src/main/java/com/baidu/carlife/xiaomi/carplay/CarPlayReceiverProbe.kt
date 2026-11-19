@@ -19,12 +19,11 @@ internal object CarPlayReceiverProbe {
         preferences: ProjectionPreferences = ProjectionPreferences(),
         onAudio: (Boolean, CarPlayAudioInfo) -> Unit = { _, _ -> },
         protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
-        customPin: Boolean = false,
         pairingStore: VehiclePairingStore? = null,
         beforeHandshake: (InetAddress) -> Unit = {},
         onStage: (String) -> Unit,
     ): String {
-        fun connect(saved: PairingCredentials?, replacing: Boolean): String = sockets.open().use { socket ->
+        fun connect(saved: PairingCredentials?): String = sockets.open().use { socket ->
             onStage("正在连接接收端")
             val address = sockets.resolve(host)
             if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isMulticastAddress) {
@@ -37,17 +36,13 @@ internal object CarPlayReceiverProbe {
                 val info = when (protocol) {
                     ReceiverProtocol.GENERIC -> readInfo(control, protocol)
                     ReceiverProtocol.BMW_MGU, ReceiverProtocol.VOLKSWAGEN -> readInfo(control, protocol, required = false)
-                    ReceiverProtocol.BMW_ID9 -> null
                 }
                 onStage("正在验证配对 PIN 和接收端身份")
                 val pairing = CarPlayPairing(control, saved, protocol)
                 val keys = pairing.pair(pin)
                 if (bluetoothCertificate != null) {
                     onStage("正在验证加密网络会话的 MFi-SAP 签名")
-                    val sapVerified = MfiSap.verify(
-                        control, bluetoothCertificate,
-                        allowUnsupported = protocol == ReceiverProtocol.BMW_ID9 && !replacing && customPin && pin != "3939",
-                    )
+                    MfiSap.verify(control, bluetoothCertificate)
                     if (saved == null && pairingStore != null) {
                         pairing.credentials()?.let { credentials ->
                             try {
@@ -57,8 +52,7 @@ internal object CarPlayReceiverProbe {
                             }
                         }
                     }
-                    val authenticated = if (sapVerified) "加密网络会话和 MFi-SAP 签名验证通过"
-                        else "加密网络配对通过 · 车机未提供 MFi-SAP 接口"
+                    val authenticated = "加密网络会话和 MFi-SAP 签名验证通过"
                     if (deviceId.isEmpty()) return@controlScope authenticated
                     onStage(authenticated)
                     if (readResolutionOnly && !protocol.isVehicle) {
@@ -76,12 +70,12 @@ internal object CarPlayReceiverProbe {
         }
 
         val saved = pairingStore?.read()
-        if (saved == null) return connect(null, replacing = false)
+        if (saved == null) return connect(null)
         return try {
-            connect(saved, replacing = false)
+            connect(saved)
         } catch (_: ReceiverPairingMissing) {
             onStage("车机配对记录已清除 · 正在重新配对")
-            connect(null, replacing = true)
+            connect(null)
         }
     }
 
