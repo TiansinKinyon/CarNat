@@ -38,7 +38,7 @@ internal object CarPlayScreenProbe {
         certificate: java.security.cert.X509Certificate,
         sockets: CarPlaySockets,
         onStreamStarted: () -> Unit,
-        onResolution: (CarPlayResolution) -> Unit,
+        onResolution: (CarPlayResolution, VideoCodec) -> Unit,
         preferences: ProjectionPreferences,
         onAudio: (Boolean, CarPlayAudioInfo) -> Unit,
         onStage: (String) -> Unit,
@@ -78,17 +78,20 @@ internal object CarPlayScreenProbe {
         fun readDisplay(receiverInfo: NSDictionary): CarPlayDisplay =
             CarPlayDisplay.fromReceiverInfo(receiverInfo, protocol).also { display ->
                 val resolution = display.resolution
-                onResolution(resolution)
                 ProjectionLog.event("车机主屏参数 · ${resolution.width}×${resolution.height}/${resolution.frameRate} fps")
             }
 
         val previousInfo = info?.let(::parse)
         val previousDisplay = if (protocol.isVehicle) null else readDisplay(checkNotNull(previousInfo))
-        val sessionReply = parse(request(control, "SETUP", if (protocol.isVehicle) sessionTarget else "/setup", session))
+        val setupTarget = if (protocol.isVehicle) sessionTarget else "/setup"
+        val offerHevc = !readResolutionOnly && preferences.videoPreference != VideoPreference.H264 &&
+            VideoCodec.hardwareHevcEncoder() != null
+        val (sessionReply, codec) = negotiateVideoCodec(control, setupTarget, session, offerHevc)
         val currentInfo = if (protocol.isVehicle) CarPlayReceiverProbe.readInfo(control, protocol, required = false) else null
         val receiverInfo = currentInfo?.let(::parse) ?: previousInfo ?: throw ProtocolException("车机未提供会话显示信息")
         val display = previousDisplay ?: readDisplay(receiverInfo)
         val resolution = display.resolution
+        onResolution(resolution, codec)
         if (readResolutionOnly) {
             if (protocol.isVehicle) {
                 try {
@@ -163,7 +166,7 @@ internal object CarPlayScreenProbe {
                                     startHeartbeat(control, sockets, video, host, keepAlivePort)
                                 } else null
                                 try {
-                                    return sendVideo(video, keys.video(connectionId), onStreamStarted, onStage)
+                                    return sendVideo(video, keys.video(connectionId), codec, onStreamStarted, onStage)
                                 } finally {
                                     videoHeartbeat?.interrupt()
                                 }
@@ -299,9 +302,30 @@ internal object CarPlayScreenProbe {
         }
     }
 
+    internal fun negotiateVideoCodec(
+        control: RtspControl, target: String, session: NSDictionary, offerHevc: Boolean,
+    ): Pair<NSDictionary, VideoCodec> {
+        var offered = offerHevc
+        if (offered) session.put("features", NSArray(NSString("hevc")))
+        fun setup() = control.request("SETUP", target, plistHeaders, BinaryPropertyListWriter.writeToArray(session))
+        var response = setup()
+        if (offered && response.status in setOf(400, 406, 415, 451, 456, 461)) {
+            session.remove("features")
+            offered = false
+            ProjectionLog.event("车机拒绝 HEVC 会话提议，改用 H.264")
+            response = setup()
+        }
+        if (response.status !in 200..299) throw ProtocolException("SETUP 失败（RTSP ${response.status}）")
+        val reply = parse(response.body)
+        val enabled = (reply.objectForKey("enabledFeatures") as? NSArray)?.array.orEmpty()
+            .filterIsInstance<NSString>().any { it.content == "hevc" }
+        return reply to if (offered && enabled) VideoCodec.HEVC else VideoCodec.H264
+    }
+
     private fun sendVideo(
         video: Socket,
         key: ByteArray,
+        negotiatedCodec: VideoCodec,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
     ): String {
@@ -338,6 +362,8 @@ internal object CarPlayScreenProbe {
             var nextPersistentReport = SystemClock.elapsedRealtime() + 30_000
             var firstPtsUs = 0L
             var firstNtp = 0L
+            var lastPtsUs = 0L
+            var lastCodec: VideoCodec? = null
             while (!video.isClosed && CarlifeConnectService.state.value.active) {
                 val now = SystemClock.elapsedRealtime()
                 if (frames == 0L && CarlifeConnectService.state.value.phase == CapturePhase.RECEIVING) {
@@ -363,18 +389,23 @@ internal object CarPlayScreenProbe {
                     nextReport = now + 5_000
                 }
                 val frame = feed.poll(200) ?: continue
-                // The AVC configuration describes the actual capture, even after a receiver resize.
+                if (frame.codec == VideoCodec.HEVC && negotiatedCodec != VideoCodec.HEVC) continue
                 val writeStarted = SystemClock.elapsedRealtime()
                 if (frames == 0L) {
                     firstPtsUs = frame.ptsUs
                     firstNtp = CarPlayTiming.now()
                 }
-                val elapsedUs = frame.ptsUs - firstPtsUs
+                if (lastCodec != null && lastCodec != frame.codec && frame.ptsUs - firstPtsUs <= lastPtsUs) {
+                    firstPtsUs = frame.ptsUs - lastPtsUs - 1
+                }
+                lastCodec = frame.codec
+                val elapsedUs = (frame.ptsUs - firstPtsUs).coerceAtLeast(lastPtsUs)
+                lastPtsUs = elapsedUs
                 val offset = ((elapsedUs / 1_000_000) shl 32) +
                     (((elapsedUs % 1_000_000) shl 32) / 1_000_000)
                 writeStartedNs.set(System.nanoTime())
                 try {
-                    frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height) }
+                    frame.configuration?.let { writer.writeConfiguration(it, frame.width, frame.height, frame.codec) }
                     writer.writeAccessUnit(frame.payload, firstNtp + offset)
                 } finally {
                     writeStartedNs.set(0)

@@ -584,6 +584,13 @@ private fun HeadUnitPicker(
             singleLine = true,
             leadingIcon = { Icon(painterResource(R.drawable.ic_car_gear), contentDescription = null) },
             label = { Text("车机品牌") },
+            supportingText = {
+                Text(when (selected) {
+                    HeadUnitProfile.GENERIC -> "DiPlay、WinPlay 或不确定车型时选通用。"
+                    HeadUnitProfile.BMW -> "在 iDrive 中选择 Apple CarPlay 并确认授权。"
+                    HeadUnitProfile.VOLKSWAGEN -> "选已配对车机，填本机蓝牙地址，连车机 Wi-Fi。"
+                })
+            },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled).fillMaxWidth(),
         )

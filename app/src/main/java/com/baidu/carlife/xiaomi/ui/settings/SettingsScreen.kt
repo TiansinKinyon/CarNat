@@ -61,6 +61,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AudioPreference
+import com.baidu.carlife.xiaomi.carplay.VideoPreference
 import com.baidu.carlife.xiaomi.carplay.CarPlayMicrophone
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
 import com.baidu.carlife.xiaomi.carplay.HeadUnitProfile
@@ -79,7 +80,7 @@ internal enum class SettingEntry(val route: String, val title: String) {
 }
 
 private enum class Editor(val title: String) {
-    RESOLUTION("输出分辨率"), FPS("输出帧率上限"), BITRATE("视频目标码率"),
+    RESOLUTION("输出分辨率"), FPS("输出帧率上限"), BITRATE("视频目标码率"), VIDEO_CODEC("视频编码"),
     AUDIO_FORMAT("音频格式"), AUDIO_BUFFER("音频缓冲"), PIN("网络配对码"),
 }
 
@@ -129,6 +130,10 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             SettingsRow(Editor.BITRATE.title, "${preferences.videoBitrateKbps} Kbps", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_mist), contentDescription = null) }) {
                 editor = Editor.BITRATE
             }
+            SettingsDivider()
+            SettingsRow(Editor.VIDEO_CODEC.title, preferences.videoPreference.label, active, capture.active, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_video_file), contentDescription = null)
+            }) { editor = Editor.VIDEO_CODEC }
             SettingsDivider()
             SettingsRow(Editor.AUDIO_FORMAT.title, preferences.audioPreference.label, active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_audio_file), contentDescription = null) }) {
                 editor = Editor.AUDIO_FORMAT
@@ -459,6 +464,28 @@ private fun ProjectionEditor(
                     },
                 )
                 NumberField("自定义（1000–20000 Kbps）", value) { value = it }
+            }
+        }
+        Editor.VIDEO_CODEC -> {
+            var format by remember { mutableStateOf(current.videoPreference) }
+            EditorDialog(editor.title, true, onDismiss,
+                { onSave(current.copy(videoPreference = format)) },
+                { onSave(current.copy(videoPreference = VideoPreference.AUTO)) }) {
+                Text("自动和 HEVC 优先会在手机与车机均支持时使用 HEVC，否则使用 H.264。")
+                Column(Modifier.selectableGroup()) {
+                    VideoPreference.entries.forEach { entry ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .selectable(selected = format == entry, role = Role.RadioButton) { format = entry }
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = format == entry, onClick = null)
+                            Text(entry.label)
+                        }
+                    }
+                }
             }
         }
         Editor.AUDIO_FORMAT -> {

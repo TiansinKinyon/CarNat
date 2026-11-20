@@ -86,9 +86,9 @@ internal class ReceiverWifiRequest(
         }
     }
 
-    fun awaitNetwork(): Network {
-        if (!ready.await(46, TimeUnit.SECONDS)) {
-            ProjectionLog.event("Wi-Fi · 46000ms 内未收到 Android 网络回调")
+    fun awaitNetwork(timeoutMs: Long = 46_000): Network {
+        if (!ready.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            ProjectionLog.event("Wi-Fi · ${timeoutMs}ms 内未收到 Android 网络回调")
         }
         if (closed) throw IOException("车机 Wi-Fi 连接已停止")
         return network ?: throw IOException("未能连接车机 Wi-Fi，请确认 Wi-Fi 已打开并接受系统连接请求")

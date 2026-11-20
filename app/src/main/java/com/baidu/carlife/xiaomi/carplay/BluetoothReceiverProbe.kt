@@ -58,6 +58,7 @@ internal class BluetoothReceiverProbe(
     private var peer: BluetoothSocket? = null
     @Volatile private var closed = false
 
+    @SuppressLint("MissingPermission")
     fun run(
         adapter: BluetoothAdapter,
         receiverName: String,
@@ -65,12 +66,14 @@ internal class BluetoothReceiverProbe(
         deviceId: String,
         onStreamStarted: () -> Unit,
         receiverAddress: String = "",
-        onResolution: (CarPlayResolution) -> Unit = {},
+        onResolution: (CarPlayResolution, VideoCodec) -> Unit = { _, _ -> },
         onDiagnostics: (ReceiverDiagnostics) -> Unit = {},
         readResolutionOnly: Boolean = false,
         preferences: ProjectionPreferences = ProjectionPreferences(),
         retryAfterDisconnect: Boolean = true,
         onReconnecting: () -> Unit = {},
+        handoff: WinPlayHandoff? = null,
+        onWinPlayPreflight: (WinPlayHandoff) -> Unit = {},
         onStage: (String) -> Unit,
     ) {
         try {
@@ -83,19 +86,35 @@ internal class BluetoothReceiverProbe(
                 attemptNumber++
                 val mode = if (readResolutionOnly) "预连接" else "正式连接"
                 ProjectionLog.event("CarPlay $mode · 尝试 $attemptNumber")
+                val resume = handoff?.takeIf {
+                    attemptNumber == 1 && !readResolutionOnly && profile == HeadUnitProfile.GENERIC &&
+                        Build.VERSION.SDK_INT >= 29 && it.deviceId == deviceId &&
+                        it.peer.equals(receiverAddress, ignoreCase = true) &&
+                        adapter.bondedDevices.any { device -> device.address.equals(it.peer, ignoreCase = true) }
+                }
+                val onStarted = {
+                    streamed = true
+                    onStreamStarted()
+                }
                 try {
-                    val acceptDeadline = when {
-                        reconnectUntil != 0L -> reconnectUntil
-                        profile == HeadUnitProfile.BMW -> firstConnectionDeadline
-                        else -> started + 30_000L
+                    if (resume != null && Build.VERSION.SDK_INT >= 29) {
+                        resumeWinPlay(resume, receiverName, pin, onStarted, onResolution, onDiagnostics, preferences, onStage)
+                    } else {
+                        val acceptDeadline = when {
+                            reconnectUntil != 0L -> reconnectUntil
+                            profile == HeadUnitProfile.BMW -> firstConnectionDeadline
+                            else -> started + 30_000L
+                        }
+                        val acceptTimeout = (acceptDeadline - started).coerceIn(1L, 30_000L).toInt()
+                        runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, receiverAddress, onStarted,
+                            onResolution, onDiagnostics, readResolutionOnly, preferences, onWinPlayPreflight, onStage)
                     }
-                    val acceptTimeout = (acceptDeadline - started).coerceIn(1L, 30_000L).toInt()
-                    runAttempt(adapter, receiverName, pin, deviceId, acceptTimeout, receiverAddress, {
-                        streamed = true
-                        onStreamStarted()
-                    }, onResolution, onDiagnostics, readResolutionOnly, preferences, onStage)
                 } catch (error: IOException) {
                     if (closed) return
+                    if (resume != null && !streamed) {
+                        ProjectionLog.failure("WinPlay 热点恢复未完成，继续等待蓝牙", error)
+                        continue
+                    }
                     val windowDeadline = if (reconnectUntil != 0L) reconnectUntil else firstConnectionDeadline
                     if (error is BmwWindowPending && SystemClock.elapsedRealtime() < windowDeadline) {
                         onStage("已完成宝马蓝牙认证 · 等待 CarPlay 链路")
@@ -121,6 +140,54 @@ internal class BluetoothReceiverProbe(
         }
     }
 
+    @androidx.annotation.RequiresApi(29)
+    private fun resumeWinPlay(
+        handoff: WinPlayHandoff,
+        receiverName: String,
+        pin: String,
+        onStreamStarted: () -> Unit,
+        onResolution: (CarPlayResolution, VideoCodec) -> Unit,
+        onDiagnostics: (ReceiverDiagnostics) -> Unit,
+        preferences: ProjectionPreferences,
+        onStage: (String) -> Unit,
+    ) {
+        val attempt = CarPlaySockets()
+        val request = synchronized(this) {
+            if (closed) throw IOException("CarPlay 会话已停止")
+            sockets = attempt
+            ReceiverWifiRequest(connectivity, attempt::close).also {
+                wifiRequest = it
+                it.start(handoff.wifi)
+            }
+        }
+        onStage("CarWith 已重启 · 正在重新连接 WinPlay 热点")
+        val network = request.awaitNetwork(timeoutMs = 15_000)
+        val link = connectivity.getLinkProperties(network)
+        attempt.useNetwork(network, link?.interfaceName)
+        var diagnostics = ReceiverDiagnostics(
+            wifi = handoff.wifi, receiverName = receiverName, receiverAddress = handoff.peer,
+            phoneAddress = handoff.deviceId, host = handoff.host, port = handoff.port,
+            wifiInterface = link?.interfaceName,
+            phoneIps = link?.linkAddresses?.mapNotNull { it.address.hostAddress }.orEmpty(),
+        )
+        onDiagnostics(diagnostics)
+        onStage("已重新连接 WinPlay 热点")
+        onStage(CarPlayReceiverProbe.verify(
+            handoff.host, handoff.port, pin, handoff.certificate, handoff.deviceId, attempt, onStreamStarted,
+            onResolution = { resolution, codec ->
+                diagnostics = diagnostics.copy(resolution = resolution)
+                onDiagnostics(diagnostics)
+                onResolution(resolution, codec)
+            },
+            preferences = preferences,
+            onAudio = { navigation, info ->
+                diagnostics = if (navigation) diagnostics.copy(navigationAudio = info) else diagnostics.copy(mediaAudio = info)
+                onDiagnostics(diagnostics)
+            },
+            onStage = onStage,
+        ))
+    }
+
     @SuppressLint("MissingPermission")
     private fun runAttempt(
         adapter: BluetoothAdapter,
@@ -130,10 +197,11 @@ internal class BluetoothReceiverProbe(
         acceptTimeout: Int,
         receiverAddress: String,
         onStreamStarted: () -> Unit,
-        onResolution: (CarPlayResolution) -> Unit,
+        onResolution: (CarPlayResolution, VideoCodec) -> Unit,
         onDiagnostics: (ReceiverDiagnostics) -> Unit,
         readResolutionOnly: Boolean,
         preferences: ProjectionPreferences,
+        onWinPlayPreflight: (WinPlayHandoff) -> Unit,
         onStage: (String) -> Unit,
     ) {
         val attempt = CarPlaySockets()
@@ -326,10 +394,10 @@ internal class BluetoothReceiverProbe(
             onDiagnostics(diagnostics)
             onStage(CarPlayReceiverProbe.verify(
                 address.first, address.second, pin, endpoint.certificate, deviceId, attempt, onStreamStarted,
-                onResolution = { resolution ->
+                onResolution = { resolution, codec ->
                     diagnostics = diagnostics.copy(resolution = resolution)
                     onDiagnostics(diagnostics)
-                    onResolution(resolution)
+                    onResolution(resolution, codec)
                 },
                 readResolutionOnly = readResolutionOnly,
                 preferences = preferences,
@@ -344,6 +412,10 @@ internal class BluetoothReceiverProbe(
                     VehiclePairingStore(it, deviceId, device.address, endpoint.certificate, endpoint.protocol)
                 },
             ))
+            val wifi = endpoint.wifi
+            if (readResolutionOnly && wifi != null && WinPlayHandoff.isWinPlay(endpoint.protocol, endpoint.identity)) {
+                onWinPlayPreflight(WinPlayHandoff(wifi, address.first, address.second, endpoint.certificate, device.address, deviceId))
+            }
         }
     }
 

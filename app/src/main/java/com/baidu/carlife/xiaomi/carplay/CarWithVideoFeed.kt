@@ -20,22 +20,27 @@ internal object CarWithVideoFeed {
         if (current === subscription) current = null
     }
 
-    fun offer(data: ByteBuffer, config: ByteArray, width: Int, height: Int, keyFrame: Boolean, ptsUs: Long) {
-        current?.offer(data, config, width, height, keyFrame, ptsUs)
+    fun offer(data: ByteBuffer, config: ByteArray, width: Int, height: Int, keyFrame: Boolean, ptsUs: Long, codec: VideoCodec = VideoCodec.H264) {
+        current?.offer(data, config, width, height, keyFrame, ptsUs, codec)
     }
 
     class Subscription {
         private val frames = ArrayBlockingQueue<Frame>(8)
         private val queuedBytes = java.util.concurrent.atomic.AtomicInteger()
         private var needsKeyFrame = true
+        private var lastCodec: VideoCodec? = null
         private val encoded = java.util.concurrent.atomic.AtomicLong()
         private val discarded = java.util.concurrent.atomic.AtomicLong()
 
         fun counts() = encoded.get() to discarded.get()
 
         // Called by the encoder's single callback thread.
-        fun offer(data: ByteBuffer, config: ByteArray, width: Int, height: Int, keyFrame: Boolean, ptsUs: Long) {
+        fun offer(data: ByteBuffer, config: ByteArray, width: Int, height: Int, keyFrame: Boolean, ptsUs: Long, codec: VideoCodec = VideoCodec.H264) {
             encoded.incrementAndGet()
+            if (lastCodec != codec) {
+                discardPending()
+                lastCodec = codec
+            }
             if (needsKeyFrame && !keyFrame) {
                 discarded.incrementAndGet()
                 return
@@ -65,7 +70,7 @@ internal object CarWithVideoFeed {
             }
             val configuration = if (needsKeyFrame) config else null
             needsKeyFrame = false
-            val frame = Frame(payload, configuration, width, height, ptsUs)
+            val frame = Frame(payload, configuration, width, height, ptsUs, codec)
             queuedBytes.addAndGet(frame.size)
             frames.add(frame)
         }
@@ -86,7 +91,7 @@ internal object CarWithVideoFeed {
 
     data class Frame(
         val payload: ByteArray, val configuration: ByteArray?,
-        val width: Int, val height: Int, val ptsUs: Long,
+        val width: Int, val height: Int, val ptsUs: Long, val codec: VideoCodec,
     ) {
         val size get() = payload.size + (configuration?.size ?: 0)
     }

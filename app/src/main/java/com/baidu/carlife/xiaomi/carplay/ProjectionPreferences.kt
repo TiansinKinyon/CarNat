@@ -2,6 +2,10 @@ package com.baidu.carlife.xiaomi.carplay
 
 import android.content.Context
 
+internal enum class VideoPreference(val label: String) {
+    AUTO("自动"), H264("H.264"), HEVC("HEVC 优先")
+}
+
 internal enum class AudioPreference(val label: String) {
     AUTO("自动"), AAC("优先 AAC"), PCM("优先 PCM")
 }
@@ -15,6 +19,7 @@ internal data class ProjectionPreferences(
     val mediaBufferMs: Int? = null,
     val navigationBufferMs: Int? = null,
     val useCarMicrophone: Boolean = false,
+    val videoPreference: VideoPreference = VideoPreference.AUTO,
 ) {
     val manualDisplayMode: CarPlayResolution?
         get() {
@@ -35,6 +40,7 @@ internal data class ProjectionPreferences(
         .putInt("height", height ?: 0)
         .putInt("fps_limit", fpsLimit ?: 0)
         .putInt("video_bitrate", videoBitrateKbps)
+        .putString("video_preference", videoPreference.name)
         .putString("audio_preference", audioPreference.name)
         .putInt("media_buffer", mediaBufferMs ?: 0)
         .putInt("navigation_buffer", navigationBufferMs ?: 0)
@@ -63,6 +69,9 @@ internal data class ProjectionPreferences(
                 height = height.takeIf { width != null },
                 fpsLimit = read("fps_limit", frameRates),
                 videoBitrateKbps = read("video_bitrate", videoBitrates) ?: DEFAULT_BITRATE_KBPS,
+                videoPreference = prefs.getString("video_preference", null)?.let { saved ->
+                    VideoPreference.entries.firstOrNull { it.name == saved } ?: VideoPreference.H264
+                } ?: VideoPreference.AUTO,
                 audioPreference = audioPreference ?: AudioPreference.AUTO,
                 mediaBufferMs = read("media_buffer", audioBuffers),
                 navigationBufferMs = read("navigation_buffer", audioBuffers),

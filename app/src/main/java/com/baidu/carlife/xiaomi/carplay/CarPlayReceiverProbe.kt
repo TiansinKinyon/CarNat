@@ -14,7 +14,7 @@ internal object CarPlayReceiverProbe {
         deviceId: String = "",
         sockets: CarPlaySockets = CarPlaySockets(),
         onStreamStarted: () -> Unit = {},
-        onResolution: (CarPlayResolution) -> Unit = {},
+        onResolution: (CarPlayResolution, VideoCodec) -> Unit = { _, _ -> },
         readResolutionOnly: Boolean = false,
         preferences: ProjectionPreferences = ProjectionPreferences(),
         onAudio: (Boolean, CarPlayAudioInfo) -> Unit = { _, _ -> },
@@ -57,7 +57,7 @@ internal object CarPlayReceiverProbe {
                     onStage(authenticated)
                     if (readResolutionOnly && !protocol.isVehicle) {
                         val response = checkNotNull(info)
-                        onResolution(CarPlayDisplay.fromReceiverInfo(CarPlayPlist.readDictionary(response)).resolution)
+                        onResolution(CarPlayDisplay.fromReceiverInfo(CarPlayPlist.readDictionary(response)).resolution, VideoCodec.H264)
                         return@controlScope "已读取车机主屏分辨率"
                     }
                     return@controlScope CarPlayScreenProbe.run(

@@ -42,6 +42,10 @@ import com.baidu.carlife.xiaomi.MainActivity
 import com.baidu.carlife.xiaomi.diagnostics.ProjectionLog
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
+import com.baidu.carlife.xiaomi.carplay.HevcPayload
+import com.baidu.carlife.xiaomi.carplay.WinPlayHandoff
+import com.baidu.carlife.xiaomi.carplay.VideoCodec
+import com.baidu.carlife.xiaomi.carplay.VideoPreference
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
 import com.baidu.carlife.xiaomi.carplay.CarPlayResolution
 import com.baidu.carlife.xiaomi.carplay.CarWithVideoFeed
@@ -83,6 +87,7 @@ class CarlifeConnectService : Service() {
         capture: CaptureSession,
         expectedResolution: CarPlayResolution? = null,
         fromCarWith: Boolean = false,
+        handoff: WinPlayHandoff? = null,
     ) {
         val readResolutionOnly = expectedResolution == null && !fromCarWith
         val preferences = ProjectionPreferences.load(this)
@@ -115,7 +120,9 @@ class CarlifeConnectService : Service() {
             var streamed = false
             var terminalError: String? = null
             var probedResolution: CarPlayResolution? = null
+            var winPlayPreflight: WinPlayHandoff? = null
             var captureResolution = expectedResolution
+            var captureBound = expectedResolution != null
             try {
                 withContext(Dispatchers.IO) {
                     probe.run(
@@ -145,19 +152,23 @@ class CarlifeConnectService : Service() {
                         readResolutionOnly = readResolutionOnly,
                         preferences = preferences,
                         retryAfterDisconnect = !fromCarWith,
-                        onResolution = { resolution ->
+                        handoff = handoff,
+                        onWinPlayPreflight = { winPlayPreflight = it },
+                        onResolution = { resolution, codec ->
                             val currentResolution = captureResolution
                             if (readResolutionOnly) {
                                 probedResolution = resolution
-                            } else if (currentResolution == null) {
-                                val chosen = preferences.applyTo(resolution)
+                            } else if (!captureBound) {
+                                val chosen = currentResolution ?: preferences.applyTo(resolution)
                                 captureResolution = chosen
+                                captureBound = true
                                 projectionScope.launch {
-                                    if (receiverProbe === probe && !stopping) bindCapture(capture, chosen)
+                                    if (receiverProbe === probe && !stopping) bindCapture(capture, chosen, codec)
                                 }
                             } else {
+                                worker.post { capture.applyNegotiatedCodec(codec) }
                                 val changed = preferences.manualDisplayMode == null &&
-                                    !currentResolution.matchesEncoderSettings(preferences.applyTo(resolution))
+                                    currentResolution?.matchesEncoderSettings(preferences.applyTo(resolution)) == false
                                 projectionScope.launch {
                                     if (receiverProbe === probe) {
                                         mutableState.update { it.copy(receiverDisplayChanged = changed) }
@@ -204,7 +215,7 @@ class CarlifeConnectService : Service() {
                         }
                     }
                     mutableReceiverDiagnostics.value = ReceiverDiagnostics()
-                    probedResolution?.let(::prepareCarWithLaunch)
+                    probedResolution?.let { prepareCarWithLaunch(it, winPlayPreflight) }
                     if (streamed && fromCarWith && terminalError == null) worker.post { capture.end() }
                 }
             }
@@ -216,6 +227,7 @@ class CarlifeConnectService : Service() {
         receiverProbe?.close()
         receiverProbe = null
         launchResolution = null
+        launchWinPlay = null
         main.removeCallbacks(armTimeout)
         mutableReceiverDiagnostics.value = ReceiverDiagnostics()
         receiverJob?.cancel()
@@ -334,14 +346,14 @@ class CarlifeConnectService : Service() {
             startReceiver(capture, fromCarWith = true)
             return START_NOT_STICKY
         }
-        val resolution = if (carWithRequest && !stopping && (phase == CapturePhase.ARMED || !phase.isActive)) {
+        val launch = if (carWithRequest && !stopping && (phase == CapturePhase.ARMED || !phase.isActive)) {
             consumeLaunchTicket(this)
         } else null
-        if (intent != null && resolution != null) {
+        if (intent != null && launch != null) {
             startProjectionForeground()
             ProjectionLog.event("CarWith 启动组件 · usb_type=$connectionType")
             Log.i(TAG, "CarLife start received, usb_type=$connectionType")
-            beginCapture(connectionType, resolution)
+            beginCapture(connectionType, launch.resolution, launch.winPlay)
         } else if (!mutableState.value.active) {
             // Even a declined external start must satisfy startForegroundService's contract.
             startProjectionForeground()
@@ -350,9 +362,10 @@ class CarlifeConnectService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun prepareCarWithLaunch(resolution: CarPlayResolution) {
+    private fun prepareCarWithLaunch(resolution: CarPlayResolution, winPlay: WinPlayHandoff? = null) {
         ProjectionLog.event("投屏参数已就绪 · ${resolution.width}×${resolution.height} / ${resolution.frameRate} fps")
         launchResolution = resolution
+        launchWinPlay = winPlay
         main.postDelayed(armTimeout, CAR_WITH_START_TIMEOUT_MS)
         mutableState.update {
             it.copy(
@@ -362,17 +375,20 @@ class CarlifeConnectService : Service() {
         }
     }
 
-    private fun beginCapture(connectionType: Int, resolution: CarPlayResolution) {
+    private fun beginCapture(connectionType: Int, resolution: CarPlayResolution, winPlay: WinPlayHandoff?) {
         val preferences = ProjectionPreferences.load(this)
         val encoderResolution = preferences.applyTo(resolution)
         val capture = CaptureSession(videoBitrateKbps = preferences.videoBitrateKbps)
         main.removeCallbacks(armTimeout)
         mutableState.update { it.copy(connectionType = connectionType) }
-        bindCapture(capture, encoderResolution)
-        startReceiver(capture, expectedResolution = encoderResolution)
+        bindCapture(capture, encoderResolution, VideoCodec.H264, allowUpgrade = preferences.videoPreference != VideoPreference.H264)
+        startReceiver(capture, expectedResolution = encoderResolution, handoff = winPlay)
     }
 
-    private fun bindCapture(capture: CaptureSession, encoderResolution: CarPlayResolution) {
+    private fun bindCapture(
+        capture: CaptureSession, encoderResolution: CarPlayResolution, videoCodec: VideoCodec,
+        allowUpgrade: Boolean = false,
+    ) {
         mutableState.update {
             it.copy(
                 phase = CapturePhase.BINDING,
@@ -383,6 +399,8 @@ class CarlifeConnectService : Service() {
         }
         worker.post {
             session = capture
+            capture.videoCodec = videoCodec
+            capture.allowUpgrade = allowUpgrade
             capture.bind(encoderResolution)
         }
     }
@@ -541,7 +559,10 @@ class CarlifeConnectService : Service() {
                 worker.postDelayed(this, OUTPUT_SAMPLE_MS)
             }
         }
-        private var avcConfiguration: ByteArray? = null
+        var videoCodec = VideoCodec.H264
+        var allowUpgrade = false
+        private var reusableSurface = false
+        private var videoConfiguration: ByteArray? = null
         private var inspectedKeyFrame = false
         private var lastSyncRequest = -1_000L
         private val syncRequestPending = java.util.concurrent.atomic.AtomicBoolean()
@@ -694,7 +715,10 @@ class CarlifeConnectService : Service() {
             }
         }
 
-        private val timeout = Runnable {
+        private val timeout: Runnable = Runnable {
+            if (mutableState.value.displayId != null && fallBackToH264("HEVC 未及时输出可用画面")) {
+                return@Runnable
+            }
             val message = when {
                 manager == null -> "Timed out binding the CarWith cast service"
                 mutableState.value.displayId == null -> "CarWith did not return onCastPrepared"
@@ -827,7 +851,7 @@ class CarlifeConnectService : Service() {
             val size = resolution ?: return
             if (codec != null) return
             try {
-                val inputSurface = startEncoder(size)
+                val inputSurface = startPreferredEncoder(size)
                 mutableState.update { it.copy(phase = CapturePhase.WAITING_FOR_FRAMES) }
                 worker.postDelayed(timeout, 12_000)
                 ProjectionLog.event("正在调用 CarWith 投屏接口")
@@ -855,8 +879,112 @@ class CarlifeConnectService : Service() {
             worker.post { if (!closed) fail("CarWith returned no cast interface", "onNullBinding") }
         }
 
-        private fun startEncoder(size: CarPlayResolution): Surface {
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height)
+        private fun startPreferredEncoder(size: CarPlayResolution): Surface {
+            if (videoCodec == VideoCodec.HEVC) {
+                val name = VideoCodec.hardwareHevcEncoder(size)
+                if (name != null) {
+                    try {
+                        surface = MediaCodec.createPersistentInputSurface()
+                        reusableSurface = true
+                        return startEncoder(size, name, surface)
+                    } catch (error: Exception) {
+                        ProjectionLog.failure("HEVC 编码器启动失败，改用 H.264", error)
+                        val failedEncoder = codec
+                        codec = null
+                        runCatching { failedEncoder?.release() }
+                        runCatching { surface?.release() }
+                        surface = null
+                        reusableSurface = false
+                        videoConfiguration = null
+                    }
+                } else {
+                    ProjectionLog.event("当前分辨率或帧率无可用 HEVC 硬件编码器，改用 H.264")
+                }
+                videoCodec = VideoCodec.H264
+            }
+            if (allowUpgrade && VideoCodec.hardwareHevcEncoder(size) != null) {
+                try {
+                    surface = MediaCodec.createPersistentInputSurface()
+                    reusableSurface = true
+                    return startEncoder(size, persistentSurface = surface)
+                } catch (error: Exception) {
+                    ProjectionLog.failure("可复用采集面启动失败，继续使用 H.264", error)
+                    releaseEncoderForSwitch()
+                    runCatching { surface?.release() }
+                    surface = null
+                    reusableSurface = false
+                    allowUpgrade = false
+                }
+            }
+            return startEncoder(size)
+        }
+
+        fun applyNegotiatedCodec(negotiated: VideoCodec) {
+            if (closed) return
+            if (negotiated == VideoCodec.H264) {
+                allowUpgrade = false
+                if (videoCodec == VideoCodec.HEVC) fallBackToH264("接收端本轮未启用 HEVC")
+                return
+            }
+            if (!allowUpgrade || videoCodec == VideoCodec.HEVC) return
+            val size = resolution ?: return
+            val encoderName = VideoCodec.hardwareHevcEncoder(size) ?: return
+            allowUpgrade = false
+            if (codec == null) {
+                videoCodec = VideoCodec.HEVC
+                return
+            }
+            if (!reusableSurface) return
+            val input = surface ?: return
+            releaseEncoderForSwitch()
+            videoCodec = VideoCodec.HEVC
+            try {
+                startEncoder(size, encoderName, input)
+                if (frames == 0L) worker.postDelayed(timeout, 12_000)
+                requestSyncFrame()
+            } catch (error: Exception) {
+                ProjectionLog.failure("HEVC 编码器启动失败，改用 H.264", error)
+                fallBackToH264("无法切换到 HEVC")
+            }
+        }
+
+        private fun releaseEncoderForSwitch() {
+            worker.removeCallbacks(timeout)
+            worker.removeCallbacks(sampleOutput)
+            val previous = codec
+            codec = null
+            videoConfiguration = null
+            inspectedKeyFrame = false
+            runCatching { previous?.release() }
+        }
+
+        private fun fallBackToH264(reason: String): Boolean {
+            if (closed || videoCodec != VideoCodec.HEVC) return false
+            val input = surface ?: return false
+            val size = resolution ?: return false
+            ProjectionLog.event("$reason · 改用 H.264")
+            releaseEncoderForSwitch()
+            allowUpgrade = false
+            videoCodec = VideoCodec.H264
+            return try {
+                startEncoder(size, persistentSurface = input)
+                if (frames == 0L) worker.postDelayed(timeout, 12_000)
+                requestSyncFrame()
+                true
+            } catch (error: Exception) {
+                ProjectionLog.failure("无法在当前采集面回退到 H.264", error)
+                fail("无法切换到 H.264")
+                false
+            }
+        }
+
+        private fun startEncoder(
+            size: CarPlayResolution, encoderName: String? = null, persistentSurface: Surface? = null,
+        ): Surface {
+            val format = MediaFormat.createVideoFormat(videoCodec.mime, size.width, size.height)
+            if (videoCodec == VideoCodec.HEVC) {
+                format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
+            }
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             format.setInteger(MediaFormat.KEY_BIT_RATE, videoBitrateKbps * 1_000)
             format.setInteger(MediaFormat.KEY_FRAME_RATE, size.frameRate)
@@ -865,35 +993,36 @@ class CarlifeConnectService : Service() {
             }
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
-            ProjectionLog.event("请求 AVC 编码器 · ${size.width}×${size.height}/${size.frameRate} fps · ${videoBitrateKbps} kbps")
-            val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            ProjectionLog.event("请求 ${videoCodec.label} 编码器 · ${size.width}×${size.height}/${size.frameRate} fps · ${videoBitrateKbps} kbps")
+            val encoder = if (encoderName == null) MediaCodec.createEncoderByType(videoCodec.mime)
+                else MediaCodec.createByCodecName(encoderName)
             codec = encoder
             encoder.setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
                 override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                    if (closed) return
+                    if (closed || codec !== this@CaptureSession.codec) return
                     try {
                         val width = format.visibleDimension(MediaFormat.KEY_WIDTH, MediaFormat.KEY_CROP_LEFT, MediaFormat.KEY_CROP_RIGHT)
                         val height = format.visibleDimension(MediaFormat.KEY_HEIGHT, MediaFormat.KEY_CROP_TOP, MediaFormat.KEY_CROP_BOTTOM)
                         mutableState.update { it.copy(outputWidth = width, outputHeight = height) }
                         val sps = format.getByteBuffer("csd-0")
-                        ProjectionLog.event("AVC 输出格式 · ${width}×${height} · hasSps=${sps != null}")
-                        if (sps != null) readConfiguration(sps, format.getByteBuffer("csd-1"))
+                        ProjectionLog.event("${videoCodec.label} 输出格式 · ${width}×${height} · hasSps=${sps != null}")
+                        if (sps != null) readConfiguration(sps, format.getByteBuffer("csd-1"), format.getByteBuffer("csd-2"))
                     } catch (error: RuntimeException) {
-                        ProjectionLog.failure("读取 AVC 输出格式失败", error)
+                        ProjectionLog.failure("读取 ${videoCodec.label} 输出格式失败", error)
                         fail("无法读取视频编码器输出格式")
                     }
                 }
 
                 override fun onError(codec: MediaCodec, error: MediaCodec.CodecException) {
-                    if (!closed) {
+                    if (!closed && codec === this@CaptureSession.codec) {
                         ProjectionLog.failure("视频编码器异常 · code=${error.errorCode} transient=${error.isTransient} recoverable=${error.isRecoverable}", error)
-                        fail(error.diagnosticInfo)
+                        if (!fallBackToH264("HEVC 编码器异常")) fail(error.diagnosticInfo)
                     }
                 }
 
                 override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                    if (closed) return
+                    if (closed || codec !== this@CaptureSession.codec) return
                     try {
                         try {
                             inspectOutput(codec, index, info)
@@ -901,26 +1030,29 @@ class CarlifeConnectService : Service() {
                             codec.releaseOutputBuffer(index, false)
                         }
                     } catch (error: RuntimeException) {
-                        ProjectionLog.failure("读取或释放 AVC 输出缓冲失败", error)
+                        ProjectionLog.failure("读取或释放视频输出缓冲失败", error)
                         fail("无法读取或释放视频编码器输出")
                         return
                     }
-                    if (info.size <= 0 || info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) return
+                    if (info.size <= 0 || info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 ||
+                        (videoCodec == VideoCodec.HEVC && videoConfiguration == null)
+                    ) return
                     frames++
                     bytes += info.size
                     if (frames == 1L) {
-                        Log.i(TAG, "First H.264 frame, ${info.size} bytes")
+                        Log.i(TAG, "First ${videoCodec.label} frame, ${info.size} bytes")
                         worker.removeCallbacks(timeout)
                         ProjectionLog.event("CarWith 首个编码帧已输出")
                         mutableState.update { it.copy(phase = CapturePhase.RECEIVING, frames = frames, bytes = bytes) }
                     }
                 }
             }, worker)
-            ProjectionLog.event("配置 AVC 编码器 · ${encoder.name}")
+            ProjectionLog.event("配置 ${videoCodec.label} 编码器 · ${encoder.name}")
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            val inputSurface = encoder.createInputSurface()
+            val inputSurface = persistentSurface?.also(encoder::setInputSurface) ?: encoder.createInputSurface()
             surface = inputSurface
             encoder.start()
+            mutableState.update { it.copy(videoCodec = videoCodec.label) }
             sampledAtMs = SystemClock.elapsedRealtime()
             worker.postDelayed(sampleOutput, OUTPUT_SAMPLE_MS)
             keyFrameSink = requestSyncFrame
@@ -934,18 +1066,18 @@ class CarlifeConnectService : Service() {
 
             val data = codec.getOutputBuffer(index)?.duplicate() ?: return
             if (info.offset < 0 || info.offset > data.capacity() || info.size > data.capacity() - info.offset) {
-                Log.w(TAG, "Invalid AVC output buffer range")
+                Log.w(TAG, "Invalid video output buffer range")
                 return
             }
             data.limit(info.offset + info.size)
             data.position(info.offset)
             if (configBuffer) {
-                if (avcConfiguration == null) readConfiguration(data, null)
+                if (videoConfiguration == null) readConfiguration(data, null)
                 return
             }
-            val configuration = avcConfiguration ?: return
+            val configuration = videoConfiguration ?: return
             val size = checkNotNull(resolution)
-            CarWithVideoFeed.offer(data.slice(), configuration, size.width, size.height, keyFrame, info.presentationTimeUs)
+            CarWithVideoFeed.offer(data.slice(), configuration, size.width, size.height, keyFrame, info.presentationTimeUs, videoCodec)
             if (inspectedKeyFrame || !keyFrame) return
             try {
                 val accessUnit = AvcPayload.accessUnit(data)
@@ -953,17 +1085,22 @@ class CarlifeConnectService : Service() {
                 mutableState.update {
                     it.copy(avcConfigBytes = configuration.size, avcKeyFrameBytes = accessUnit.size)
                 }
-                Log.i(TAG, "CarPlay video input: avcC=${configuration.size}, key frame=${accessUnit.size}")
+                Log.i(TAG, "CarPlay video input: config=${configuration.size}, key frame=${accessUnit.size}")
             } catch (error: IllegalArgumentException) {
-                Log.w(TAG, "Could not format AVC key frame: ${error.message}")
+                Log.w(TAG, "Could not format video key frame: ${error.message}")
             }
         }
 
-        private fun readConfiguration(sps: ByteBuffer, pps: ByteBuffer?) {
+        private fun readConfiguration(sps: ByteBuffer, pps: ByteBuffer?, third: ByteBuffer? = null) {
             try {
-                avcConfiguration = AvcPayload.configuration(sps, pps)
+                val size = checkNotNull(resolution)
+                videoConfiguration = if (videoCodec == VideoCodec.HEVC) {
+                    HevcPayload.configuration(listOfNotNull(sps, pps, third), size.width, size.height)
+                } else {
+                    AvcPayload.configuration(sps, pps)
+                }
             } catch (error: IllegalArgumentException) {
-                Log.w(TAG, "Could not format AVC configuration: ${error.message}")
+                Log.w(TAG, "Could not format video configuration: ${error.message}")
             }
         }
 
@@ -1025,7 +1162,7 @@ class CarlifeConnectService : Service() {
                 mutableState.update {
                     it.copy(
                         phase = if (it.phase == CapturePhase.FAILED) CapturePhase.FAILED else CapturePhase.STOPPED,
-                        frames = frames, bytes = bytes, outputFps = null, outputMbps = null,
+                        frames = frames, bytes = bytes, outputFps = null, outputMbps = null, videoCodec = null,
                         outputWidth = null, outputHeight = null, displayId = null, receiverDisplayChanged = false,
                     )
                 }
@@ -1051,6 +1188,8 @@ class CarlifeConnectService : Service() {
         // CarWith force-stops the CarLife component before starting its service.
         private const val LAUNCH_TICKET = "pending_carwith_launch"
         private var launchResolution: CarPlayResolution? = null
+        private var launchWinPlay: WinPlayHandoff? = null
+        private data class CarWithLaunch(val resolution: CarPlayResolution, val winPlay: WinPlayHandoff?)
         private const val DPI = 160
         private const val OUTPUT_SAMPLE_MS = 1_000L
         private val mutableReceiverDiagnostics = MutableStateFlow(ReceiverDiagnostics())
@@ -1099,6 +1238,13 @@ class CarlifeConnectService : Service() {
             val resolution = launchResolution ?: return false
             if (awaitingLaunch.phase != CapturePhase.READY_TO_START_CAR_WITH) return false
             val receiver = ReceiverSettings.load(context)
+            val token = launchWinPlay?.takeIf {
+                HeadUnitProfile.load(context) == HeadUnitProfile.GENERIC &&
+                    it.peer.equals(receiver.receiverAddress, ignoreCase = true)
+            }?.let { handoff ->
+                UUID.randomUUID().toString().takeIf { WinPlayHandoff.save(context, it, handoff) }
+            }
+            if (token == null) WinPlayHandoff.clear(context)
             if (!context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE).edit()
                     .putLong("elapsed", SystemClock.elapsedRealtime())
                     .putLong("wall", System.currentTimeMillis())
@@ -1106,31 +1252,43 @@ class CarlifeConnectService : Service() {
                     .putInt("height", resolution.height)
                     .putInt("max_fps", resolution.maxFps ?: 0)
                     .putString("receiver", receiver.receiverAddress)
+                    .putString("winplay", token)
                     .commit()
-            ) return false
+            ) {
+                WinPlayHandoff.clear(context)
+                return false
+            }
             val armed = awaitingLaunch.copy(phase = CapturePhase.ARMED, receiverStatus = "正在启动 CarWith")
             if (mutableState.compareAndSet(awaitingLaunch, armed)) return true
             clearLaunchTicket(context)
             return false
         }
 
-        private fun consumeLaunchTicket(context: Context): CarPlayResolution? {
+        private fun consumeLaunchTicket(context: Context): CarWithLaunch? {
             val ticket = context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE)
             val elapsedAge = SystemClock.elapsedRealtime() - ticket.getLong("elapsed", -CAR_WITH_START_TIMEOUT_MS)
             val wallAge = System.currentTimeMillis() - ticket.getLong("wall", 0)
             if (elapsedAge !in 0 until CAR_WITH_START_TIMEOUT_MS ||
                 wallAge !in 0 until CAR_WITH_START_TIMEOUT_MS ||
                 ticket.getString("receiver", null) != ReceiverSettings.load(context).receiverAddress
-            ) return null
+            ) {
+                clearLaunchTicket(context)
+                return null
+            }
             val width = ticket.getInt("width", 0)
             val height = ticket.getInt("height", 0)
             val maxFps = ticket.getInt("max_fps", 0).takeIf { it > 0 }
-            if (width <= 0 || height <= 0 || !clearLaunchTicket(context)) return null
-            return CarPlayResolution(width, height, maxFps)
+            val winPlay = ticket.getString("winplay", null)
+                ?.takeIf { HeadUnitProfile.load(context) == HeadUnitProfile.GENERIC }
+                ?.let { WinPlayHandoff.read(context, it) }
+            if (!clearLaunchTicket(context) || width <= 0 || height <= 0) return null
+            return CarWithLaunch(CarPlayResolution(width, height, maxFps), winPlay)
         }
 
-        private fun clearLaunchTicket(context: Context): Boolean =
-            context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE).edit().clear().commit()
+        private fun clearLaunchTicket(context: Context): Boolean {
+            WinPlayHandoff.clear(context)
+            return context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE).edit().clear().commit()
+        }
 
         internal fun reportCarWithLaunchFailure(context: Context, message: String) {
             context.startService(
@@ -1171,6 +1329,7 @@ data class CaptureStatus(
     val outputMbps: Double? = null,
     val targetVideoBitrateKbps: Int? = null,
     val encoderFpsLimit: Int? = null,
+    val videoCodec: String? = null,
 ) {
     val active: Boolean
         get() = phase.isActive

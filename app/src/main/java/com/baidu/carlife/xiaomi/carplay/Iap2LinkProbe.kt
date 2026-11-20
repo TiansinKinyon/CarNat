@@ -22,6 +22,7 @@ internal object Iap2LinkProbe {
     class Endpoint(
         val host: String?, val port: Int?, val certificate: X509Certificate, val wifi: ReceiverWifi?,
         val protocol: ReceiverProtocol,
+        val identity: String? = null,
     )
 
     fun run(
@@ -68,6 +69,7 @@ internal object Iap2LinkProbe {
         var bmwAppsOnly = false
         var requestedFullCertificate = false
         var model = ""
+        var identityText: String? = null
         var wifi: ReceiverWifi? = null
 
         fun sendControlBody(id: Int, body: ByteArray) {
@@ -237,7 +239,7 @@ internal object Iap2LinkProbe {
                                             if (protocol == ReceiverProtocol.BMW_MGU && !declaresAvailability) sendAvailability()
                                         }
                                         0x4301 -> {
-                                            val endpoint = receiverEndpoint(message, checkNotNull(leaf), wifi, protocol)
+                                            val endpoint = receiverEndpoint(message, checkNotNull(leaf), wifi, protocol, identityText)
                                             if (protocol == ReceiverProtocol.BMW_MGU || protocol == ReceiverProtocol.VOLKSWAGEN) sendControl(0x4e0e, cString(deviceId))
                                             val address = endpoint.host?.let { "$it:${endpoint.port}" }
                                             onStage(if (address != null) "已收到 CarPlay 网络端点：$address"
@@ -248,7 +250,8 @@ internal object Iap2LinkProbe {
                                 }
                             } else if (!awaitingCertificate) {
                                 if (id != 0x1d01) throw ProtocolException("Expected receiver identification")
-                                onStage("已收到 iAP2 接收端身份：${receiverIdentity(message)}")
+                                identityText = receiverIdentity(message)
+                                onStage("已收到 iAP2 接收端身份：$identityText")
                                 val identity = parameters(message, repeatableFields = identificationGroups)
                                 model = identity[1]?.toString(Charsets.UTF_8)?.substringBefore('\u0000').orEmpty()
                                 readCapabilities(identity)
@@ -376,6 +379,7 @@ internal object Iap2LinkProbe {
     private fun receiverEndpoint(
         message: ByteArray, certificate: X509Certificate, configuration: ReceiverWifi?,
         protocol: ReceiverProtocol,
+        identity: String?,
     ): Endpoint {
         val fields = parameters(message)
         val wireless = fields[1] ?: throw ProtocolException("Missing CarPlay network parameters")
@@ -415,7 +419,7 @@ internal object Iap2LinkProbe {
         if ((host == null || port == null) && (!protocol.isVehicle || (wifi == null && protocol != ReceiverProtocol.VOLKSWAGEN))) {
             throw ProtocolException("Missing CarPlay endpoint address or port")
         }
-        return Endpoint(host, port, certificate, wifi, protocol)
+        return Endpoint(host, port, certificate, wifi, protocol, identity)
     }
     private fun endpointText(bytes: ByteArray): String? =
         bytes.toString(Charsets.US_ASCII).substringBefore('\u0000')
