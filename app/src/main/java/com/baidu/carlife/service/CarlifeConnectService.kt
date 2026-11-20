@@ -141,6 +141,7 @@ class CarlifeConnectService : Service() {
                                 }
                             }
                         },
+                        onVolkswagenAwaitingInvitation = { timeout.cancel() },
                         onReconnecting = {
                             projectionScope.launch {
                                 if (receiverProbe === probe) {
@@ -1046,7 +1047,7 @@ class CarlifeConnectService : Service() {
 
                 override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                     if (closed || codec !== this@CaptureSession.codec) return
-                    try {
+                    val usableFrame = try {
                         try {
                             inspectOutput(codec, index, info)
                         } finally {
@@ -1057,9 +1058,7 @@ class CarlifeConnectService : Service() {
                         fail("无法读取或释放视频编码器输出")
                         return
                     }
-                    if (info.size <= 0 || info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 ||
-                        (videoCodec == VideoCodec.HEVC && videoConfiguration == null)
-                    ) return
+                    if (!usableFrame) return
                     frames++
                     bytes += info.size
                     if (frames == 1L) {
@@ -1082,26 +1081,27 @@ class CarlifeConnectService : Service() {
             return inputSurface
         }
 
-        private fun inspectOutput(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-            if (info.size <= 0) return
+        private fun inspectOutput(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo): Boolean {
+            if (info.size <= 0) return false
             val configBuffer = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
             val keyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
 
-            val data = codec.getOutputBuffer(index)?.duplicate() ?: return
+            val data = codec.getOutputBuffer(index)?.duplicate() ?: return false
             if (info.offset < 0 || info.offset > data.capacity() || info.size > data.capacity() - info.offset) {
                 Log.w(TAG, "Invalid video output buffer range")
-                return
+                return false
             }
             data.limit(info.offset + info.size)
             data.position(info.offset)
             if (configBuffer) {
                 if (videoConfiguration == null) readConfiguration(data, null)
-                return
+                return false
             }
-            val configuration = videoConfiguration ?: return
+            if (info.size > AvcPayload.MAX_ACCESS_UNIT_BYTES) return false
+            val configuration = videoConfiguration ?: return false
             val size = checkNotNull(resolution)
             CarWithVideoFeed.offer(data.slice(), configuration, size.width, size.height, keyFrame, info.presentationTimeUs, videoCodec)
-            if (inspectedKeyFrame || !keyFrame) return
+            if (inspectedKeyFrame || !keyFrame) return true
             try {
                 val accessUnit = AvcPayload.accessUnit(data)
                 inspectedKeyFrame = true
@@ -1111,7 +1111,9 @@ class CarlifeConnectService : Service() {
                 Log.i(TAG, "CarPlay video input: config=${configuration.size}, key frame=${accessUnit.size}")
             } catch (error: IllegalArgumentException) {
                 Log.w(TAG, "Could not format video key frame: ${error.message}")
+                return false
             }
+            return true
         }
 
         private fun readConfiguration(sps: ByteBuffer, pps: ByteBuffer?, third: ByteBuffer? = null) {
@@ -1129,7 +1131,9 @@ class CarlifeConnectService : Service() {
 
         private fun MediaFormat.visibleDimension(size: String, start: String, end: String): Int? {
             if (containsKey(start) && containsKey(end)) {
-                return (getInteger(end) - getInteger(start) + 1).takeIf { it > 0 }
+                val first = getInteger(start)
+                val last = getInteger(end)
+                return (last.toLong() - first + 1).takeIf { first >= 0 && it in 1..Int.MAX_VALUE.toLong() }?.toInt()
             }
             return if (containsKey(size)) getInteger(size).takeIf { it > 0 } else null
         }

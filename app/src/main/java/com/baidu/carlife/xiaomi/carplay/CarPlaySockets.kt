@@ -26,11 +26,12 @@ internal class CarPlaySockets : Closeable {
     }
 
     fun resolve(host: String): InetAddress {
+        val (network, interfaceName) = synchronized(this) { network to wifiInterface }
         val wifi = network ?: return InetAddress.getByName(host)
         val unscopedHost = host.substringBefore('%')
         val address = wifi.getByName(unscopedHost)
         if (address !is Inet6Address || !address.isLinkLocalAddress) return address
-        val index = wifiInterface?.let(NetworkInterface::getByName)?.index
+        val index = interfaceName?.let(NetworkInterface::getByName)?.index
             ?: throw IOException("无法确定车机 Wi-Fi 的 IPv6 接口")
         return Inet6Address.getByAddress(null, address.address, index)
     }
@@ -38,6 +39,7 @@ internal class CarPlaySockets : Closeable {
     @Synchronized
     fun openDatagram(): DatagramSocket {
         if (closed) throw IOException("CarPlay 会话已停止")
+        datagrams.removeAll(DatagramSocket::isClosed)
         val socket = DatagramSocket(null)
         try {
             socket.bind(InetSocketAddress(0))
@@ -53,6 +55,7 @@ internal class CarPlaySockets : Closeable {
     @Synchronized
     fun open(): Socket {
         if (closed) throw IOException("CarPlay 会话已停止")
+        sockets.removeAll(Socket::isClosed)
         return (network?.socketFactory?.createSocket() ?: Socket()).also(sockets::add)
     }
 

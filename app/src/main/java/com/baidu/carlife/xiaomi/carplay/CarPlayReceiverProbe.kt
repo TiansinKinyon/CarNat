@@ -22,6 +22,7 @@ internal object CarPlayReceiverProbe {
         protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
         pairingStore: VehiclePairingStore? = null,
         mguHealth: MguWifiHealth? = null,
+        onTransportAuthenticated: () -> Unit = {},
         power: () -> Iap2PowerStatus = { Iap2PowerStatus() },
         fallbackPorts: List<Int> = emptyList(),
         beforeConnect: (InetAddress) -> Unit = {},
@@ -75,6 +76,7 @@ internal object CarPlayReceiverProbe {
                     if (bluetoothCertificate != null) {
                         onStage("正在验证加密网络会话的 MFi-SAP 签名")
                         MfiSap.verify(control, bluetoothCertificate)
+                        onTransportAuthenticated()
                         if (saved == null && pairingStore != null && effectiveProtocol == protocol) {
                             pairing.credentials()?.let { credentials ->
                                 try {

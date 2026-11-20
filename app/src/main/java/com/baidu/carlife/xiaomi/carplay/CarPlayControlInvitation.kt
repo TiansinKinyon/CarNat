@@ -72,7 +72,10 @@ internal class CarPlayControlInvitation(
         }
     }
 
-    fun await(expected: InetAddress?, timeoutMs: Long = 25_000L): InetAddress? {
+    fun await(expected: InetAddress?, timeoutMs: Long = 25_000L): InetAddress? =
+        awaitInvite(expected, timeoutMs)?.host
+
+    fun awaitInvite(expected: InetAddress?, timeoutMs: Long = 25_000L): Invite? {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         synchronized(lock) {
             while (!closed && !registrationFailed) {
@@ -81,11 +84,12 @@ internal class CarPlayControlInvitation(
                 val candidate = if (expected == null) invites.values.singleOrNull() else invites[expected]
                 if (registered && candidate != null) {
                     checkNetwork()
-                    return candidate.host
+                    return candidate
                 }
                 if (now >= deadline) break
+                checkNetwork()
                 try {
-                    lock.wait(deadline - now)
+                    lock.wait(minOf(deadline - now, 1_000L))
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw IOException("等待车机邀请已取消")
@@ -93,6 +97,11 @@ internal class CarPlayControlInvitation(
             }
         }
         return null
+    }
+
+    fun checkAvailable() = synchronized(lock) {
+        if (closed || registrationFailed) throw IOException("车机邀请监听已经停止")
+        checkNetwork()
     }
 
     fun peek(): Invite? = synchronized(lock) {
@@ -163,9 +172,10 @@ internal class CarPlayControlInvitation(
                 checkNetwork()
                 val host = socket.inetAddress
                 if (host.isLoopbackAddress || host.isAnyLocalAddress || host.isMulticastAddress) return
+                // Keep the listener stoppable while replying to a slow peer.
+                socket.getOutputStream().write(RESPONSE)
                 synchronized(lock) {
                     if (closed) return
-                    socket.getOutputStream().write(RESPONSE)
                     val now = SystemClock.elapsedRealtime()
                     prune(now)
                     if (host in invites || invites.size < MAX_INVITATIONS) invites[host] = Invite(host, now)
