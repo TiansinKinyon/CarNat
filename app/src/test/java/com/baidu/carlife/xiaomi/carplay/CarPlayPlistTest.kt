@@ -34,4 +34,13 @@ class CarPlayPlistTest {
             CarPlayPlist.readDictionary(BinaryPropertyListWriter.writeToArray(NSArray(0)))
         }
     }
+
+    @Test
+    fun rejectsInvalidHeaderAndMalformedObjectMarker() {
+        val bytes = BinaryPropertyListWriter.writeToArray(NSDictionary())
+        val badHeader = bytes.copyOf().apply { this[0] = 0 }
+        val badRoot = bytes.copyOf().apply { this[8] = 0x0f }
+        assertThrows(ProtocolException::class.java) { CarPlayPlist.readDictionary(badHeader) }
+        assertThrows(ProtocolException::class.java) { CarPlayPlist.readDictionary(badRoot) }
+    }
 }

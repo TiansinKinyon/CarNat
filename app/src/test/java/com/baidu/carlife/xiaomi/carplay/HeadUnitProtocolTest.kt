@@ -53,10 +53,18 @@ class HeadUnitProtocolTest {
     @Test
     fun volkswagenKeepsItsOwnProtocolAndAcceptsOnlyConnectInvitations() {
         assertFalse(ReceiverProtocol.VOLKSWAGEN.isBmw)
-        assertTrue(VolkswagenInvitation.isConnectRequest("GET /ctrl-int/1/connect?version=1 HTTP/1.1"))
-        assertFalse(VolkswagenInvitation.isConnectRequest("POST /ctrl-int/1/connect HTTP/1.1"))
-        assertFalse(VolkswagenInvitation.isConnectRequest("GET /ctrl-int/1/connect-extra HTTP/1.1"))
-        assertFalse(VolkswagenInvitation.isConnectRequest("GET /ctrl-int/1/connect RTSP/1.0"))
+        assertTrue(CarPlayControlInvitation.isConnectRequest("GET /ctrl-int/1/connect?version=1 HTTP/1.1"))
+        assertFalse(CarPlayControlInvitation.isConnectRequest("POST /ctrl-int/1/connect HTTP/1.1"))
+        assertFalse(CarPlayControlInvitation.isConnectRequest("GET /ctrl-int/1/connect-extra HTTP/1.1"))
+        assertFalse(CarPlayControlInvitation.isConnectRequest("GET /ctrl-int/1/connect RTSP/1.0"))
+    }
+
+    @Test
+    fun desktopIdentityOverridesBmwButKeepsMguAndVolkswagenPolicies() {
+        assertEquals(ReceiverProtocol.GENERIC, ReceiverProtocol.BMW_MGU.forReceiver("DiPlay 0.1.0"))
+        assertEquals(ReceiverProtocol.GENERIC, ReceiverProtocol.BMW_MGU.forReceiver("Receiver", null, "WINPLAY"))
+        assertEquals(ReceiverProtocol.BMW_MGU, ReceiverProtocol.BMW_MGU.forReceiver("MGU-55-BMW", "BMW Group"))
+        assertEquals(ReceiverProtocol.VOLKSWAGEN, ReceiverProtocol.VOLKSWAGEN.forReceiver("VW4131"))
     }
 
     private fun reply(seq: Int, status: Int, body: ByteArray = byteArrayOf()): ByteArray =

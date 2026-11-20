@@ -12,8 +12,6 @@ import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.IOException
 import java.io.OutputStream
-import java.io.PipedInputStream
-import java.io.PipedOutputStream
 import java.net.ProtocolException
 import java.net.Socket
 
@@ -27,13 +25,36 @@ internal class CarPlayTouchEvents(
     private val certificate: java.security.cert.X509Certificate,
     private val onClosed: () -> Unit,
     private val onStage: (String) -> Unit,
-    private val onCommand: ((NSDictionary) -> Unit)? = null,
+    private val onCommand: ((NSDictionary) -> VehicleScreenResources.ModeReply?)? = null,
     private val protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
+    private val power: () -> Iap2PowerStatus = { Iap2PowerStatus() },
+    private val onNetworkIapAuthenticated: () -> Unit = {},
 ) {
     private var contacts = emptyList<RemoteContact>()
     private var knobButtons = 0
+    private val incomingIap = NetworkIapInput(IAP_BUFFER_BYTES)
 
     fun start() {
+        if (protocol.isBmw) {
+            control.onPeerCommand = { body ->
+                try {
+                    val command = CarPlayPlist.readDictionary(body)
+                    if ((command.objectForKey("type") as? NSString)?.content != "iAPSendMessage") false
+                    else {
+                        val params = command.objectForKey("params")
+                        if (params != null && params !is NSDictionary) false else {
+                            when (val data = (params as? NSDictionary)?.objectForKey("data")) {
+                                null -> true
+                                is NSData -> incomingIap.offer(data.bytes())
+                                else -> false
+                            }
+                        }
+                    }
+                } catch (_: ProtocolException) {
+                    false
+                }
+            }
+        }
         synchronized(inputOwnerLock) {
             if (inputOwner != null) CarlifeConnectService.remoteTouch(emptyList(), cancel = true)
             inputOwner = this
@@ -45,6 +66,8 @@ internal class CarPlayTouchEvents(
             } catch (error: Exception) {
                 if (!socket.isClosed) Log.w("CarNatTouch", "Event channel ended", error)
             } finally {
+                if (protocol.isBmw) control.onPeerCommand = null
+                incomingIap.close()
                 synchronized(inputOwnerLock) {
                     if (inputOwner === this) {
                         inputOwner = null
@@ -61,8 +84,6 @@ internal class CarPlayTouchEvents(
             socket.getInputStream(), keys.eventRead(),
         )))
         val output = CarPlayControlRecords.output(socket.getOutputStream(), keys.eventWrite())
-        val incomingIap = PipedInputStream(IAP_BUFFER_BYTES)
-        val iapWriter = PipedOutputStream(incomingIap)
         val outgoingIap = object : OutputStream() {
             override fun write(value: Int) = write(byteArrayOf(value.toByte()))
             override fun write(bytes: ByteArray, offset: Int, length: Int) {
@@ -81,22 +102,18 @@ internal class CarPlayTouchEvents(
         }
         Thread({
             try {
-                incomingIap.use { Iap2LinkProbe.runNetwork(it, outgoingIap, certificate, onStage) }
+                incomingIap.use {
+                    Iap2LinkProbe.runNetwork(it, outgoingIap, certificate, protocol, power, onStage, onNetworkIapAuthenticated)
+                }
             } catch (error: Exception) {
                 if (!socket.isClosed && error !is java.io.EOFException) {
                     Log.w("CarNatIap2", "Network iAP2 ended", error)
                 }
             }
         }, "CarPlay network iAP2").apply { isDaemon = true }.start()
-        iapWriter.use {
-            readCommands(input, output) { bytes ->
-                // Only this thread writes to the pipe. Its reader can only free capacity.
-                // A blocked iAP2 consumer must never block event replies and touch dispatch.
-                if (bytes.size > IAP_BUFFER_BYTES - incomingIap.available()) {
-                    throw ProtocolException("Network iAP2 event backlog exceeds the size limit")
-                }
-                it.write(bytes)
-                it.flush()
+        readCommands(input, output) { bytes ->
+            if (!incomingIap.offer(bytes) && !protocol.isBmw) {
+                throw ProtocolException("Network iAP2 event backlog exceeds the size limit")
             }
         }
     }
@@ -150,17 +167,21 @@ internal class CarPlayTouchEvents(
                     (params?.objectForKey("data") as? NSData)?.bytes()?.let(forwardIap)
                 }
             }
+            val modeReply = command?.let { onCommand?.invoke(it) }
+            val replyBody = modeReply?.let { BinaryPropertyListWriter.writeToArray(it.body) } ?: byteArrayOf()
             synchronized(output) {
                 val response = buildString {
                     append(if (isHttp) version else "RTSP/1.0")
                     append(" 200 OK\r\n")
                     if (seq != null) append("CSeq: $seq\r\n")
-                    append("Content-Length: 0\r\n\r\n")
+                    if (replyBody.isNotEmpty()) append("Content-Type: application/x-apple-binary-plist\r\n")
+                    append("Content-Length: ${replyBody.size}\r\n\r\n")
                 }
                 output.write(response.toByteArray(Charsets.US_ASCII))
+                if (replyBody.isNotEmpty()) output.write(replyBody)
                 output.flush()
             }
-            if (command != null) onCommand?.invoke(command)
+            modeReply?.afterReply?.invoke()
         }
     }
 

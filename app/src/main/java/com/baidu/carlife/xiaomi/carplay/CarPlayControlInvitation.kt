@@ -18,14 +18,16 @@ import java.net.SocketTimeoutException
 
 /** One advertisement and one consumable invitation for the selected Wi-Fi network. */
 @TargetApi(33)
-internal class VolkswagenInvitation(
+internal class CarPlayControlInvitation(
     private val connectivity: ConnectivityManager,
     private val nsd: NsdManager,
     val network: Network,
     private val localAddress: InetAddress,
     private val deviceId: String,
+    private val instanceName: String = "sender",
+    private val sourceVersion: String = SOURCE_VERSION,
 ) : Closeable {
-    private class Invite(val host: InetAddress, val receivedAt: Long)
+    class Invite(val host: InetAddress, val receivedAt: Long)
 
     private val server = ServerSocket()
     private val lock = java.lang.Object()
@@ -33,7 +35,7 @@ internal class VolkswagenInvitation(
     private var registered = false
     private var registrationFailed = false
     private var client: Socket? = null
-    private var invite: Invite? = null
+    private val invites = LinkedHashMap<InetAddress, Invite>()
     private val listener = object : NsdManager.RegistrationListener {
         override fun onServiceRegistered(service: NsdServiceInfo) {
             synchronized(lock) {
@@ -56,29 +58,28 @@ internal class VolkswagenInvitation(
         try {
             server.bind(InetSocketAddress(localAddress, 0), 4)
             nsd.registerService(NsdServiceInfo().apply {
-                serviceName = "sender"
+                serviceName = instanceName
                 serviceType = "_carplay-ctrl._tcp"
                 port = server.localPort
-                network = this@VolkswagenInvitation.network
+                network = this@CarPlayControlInvitation.network
                 setAttribute("id", deviceId)
-                setAttribute("srcvers", SOURCE_VERSION)
+                setAttribute("srcvers", sourceVersion)
             }, NsdManager.PROTOCOL_DNS_SD, listener)
-            Thread(::accept, "CarPlay Volkswagen invitation").apply { isDaemon = true; start() }
+            Thread(::accept, "CarPlay control invitation").apply { isDaemon = true; start() }
         } catch (failure: Exception) {
             close()
-            throw IOException("无法发布大众 CarPlay 控制服务", failure)
+            throw IOException("无法发布 CarPlay 控制服务", failure)
         }
     }
 
-    fun await(expected: InetAddress?): InetAddress {
-        val deadline = SystemClock.elapsedRealtime() + 25_000L
+    fun await(expected: InetAddress?, timeoutMs: Long = 25_000L): InetAddress? {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
         synchronized(lock) {
             while (!closed && !registrationFailed) {
                 val now = SystemClock.elapsedRealtime()
-                val candidate = invite
-                if (registered && candidate != null && now - candidate.receivedAt < INVITE_LIFETIME &&
-                    (expected == null || expected == candidate.host)
-                ) {
+                prune(now)
+                val candidate = if (expected == null) invites.values.singleOrNull() else invites[expected]
+                if (registered && candidate != null) {
                     checkNetwork()
                     return candidate.host
                 }
@@ -87,21 +88,31 @@ internal class VolkswagenInvitation(
                     lock.wait(deadline - now)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
-                    throw IOException("等待大众车机邀请已取消")
+                    throw IOException("等待车机邀请已取消")
                 }
             }
         }
-        throw IOException("未收到本轮大众 CarPlay 邀请，请在车机上启动 Apple CarPlay")
+        return null
     }
 
-    fun requireFresh(host: InetAddress, consume: Boolean = false) {
+    fun peek(): Invite? = synchronized(lock) {
+        prune(SystemClock.elapsedRealtime())
+        if (closed || !registered || registrationFailed) return@synchronized null
+        invites.values.singleOrNull()?.also { checkNetwork() }
+    }
+
+    fun discard(invite: Invite) = synchronized(lock) {
+        if (invites[invite.host] === invite) invites.remove(invite.host)
+    }
+
+    fun requireFresh(host: InetAddress, consume: Boolean = false, expected: Invite? = null) {
         synchronized(lock) {
             checkNetwork()
-            val candidate = invite
-            if (closed || candidate?.host != host || SystemClock.elapsedRealtime() - candidate.receivedAt >= INVITE_LIFETIME) {
+            prune(SystemClock.elapsedRealtime())
+            if (closed || host !in invites || (expected != null && invites[host] !== expected)) {
                 throw IOException("大众车机邀请已过期或端点已变化")
             }
-            if (consume) invite = null
+            if (consume) invites.remove(host)
         }
     }
 
@@ -155,7 +166,9 @@ internal class VolkswagenInvitation(
                 synchronized(lock) {
                     if (closed) return
                     socket.getOutputStream().write(RESPONSE)
-                    invite = Invite(host, SystemClock.elapsedRealtime())
+                    val now = SystemClock.elapsedRealtime()
+                    prune(now)
+                    if (host in invites || invites.size < MAX_INVITATIONS) invites[host] = Invite(host, now)
                     lock.notifyAll()
                 }
                 return
@@ -167,6 +180,7 @@ internal class VolkswagenInvitation(
         synchronized(lock) {
             if (closed) return
             closed = true
+            invites.clear()
             runCatching { server.close() }
             runCatching { client?.close() }
             lock.notifyAll()
@@ -174,8 +188,13 @@ internal class VolkswagenInvitation(
         runCatching { nsd.unregisterService(listener) }
     }
 
+    private fun prune(now: Long) {
+        invites.entries.removeAll { now - it.value.receivedAt >= INVITE_LIFETIME }
+    }
+
     companion object {
         const val SOURCE_VERSION = "770.8.1"
+        private const val MAX_INVITATIONS = 8
         private const val INVITE_LIFETIME = 20_000L
         private val RESPONSE = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             .toByteArray(Charsets.US_ASCII)

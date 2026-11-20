@@ -96,6 +96,42 @@ class Iap2LinkProbeTest {
         )
     }
 
+    @Test
+    fun diplayUsesGenericCertificateRequestEvenWithBmwSelected() {
+        val sync = byteArrayOf(1, 4, 0x10, 0, 1, 0, 0, 0, 4, 1, 10, 0, 2)
+        val identity = message(0x1d01,
+            parameter(0, "DiPlay\u0000".toByteArray()) + parameter(6, byteArrayOf(0xaa.toByte(), 6)),
+        )
+        val input = packet(0x80, 1, 0, 0, sync) +
+            packet(0x40, 1, 100, 0, byteArrayOf()) +
+            packet(0x40, 2, 100, 10, identity)
+        val output = ByteArrayOutputStream()
+        assertThrows(EOFException::class.java) {
+            Iap2LinkProbe.run(ByteArrayInputStream(input), output, profile = HeadUnitProfile.BMW) {}
+        }
+        val expected = packet(0x40, 103, 2, 10, message(0xaa00))
+        assertArrayEquals(expected, output.toByteArray().takeLast(expected.size).toByteArray())
+    }
+
+    @Test
+    fun mguNetworkControlVersionDeterminesWhetherCertificateOrIdentificationIsRequestedFirst() {
+        val certificate = checkNotNull(javaClass.getResourceAsStream("/mfi/apple-iap-v3-leaf.der")).use {
+            java.security.cert.CertificateFactory.getInstance("X.509")
+                .generateCertificate(it) as java.security.cert.X509Certificate
+        }
+        for ((version, firstMessage) in listOf(1 to 0xaa00, 2 to 0x1d00)) {
+            val sync = byteArrayOf(1, 4, 0x10, 0, 1, 0, 0, 0, 4, 1, 10, 0, version.toByte())
+            val input = packet(0x80, 1, 0, 0, sync) + packet(0x40, 1, 100, 0, byteArrayOf())
+            val output = ByteArrayOutputStream()
+            assertThrows(EOFException::class.java) {
+                Iap2LinkProbe.runNetwork(ByteArrayInputStream(input), output, certificate,
+                    ReceiverProtocol.BMW_MGU, { Iap2PowerStatus() }, {}, {})
+            }
+            assertArrayEquals(packet(0xc0, 100, 1, 0, sync) +
+                packet(0x40, 101, 1, 10, message(firstMessage)), output.toByteArray())
+        }
+    }
+
     private fun message(id: Int, body: ByteArray = byteArrayOf()): ByteArray =
         byteArrayOf(0x40, 0x40) + parameter(id, body, size = 6 + body.size)
 

@@ -28,6 +28,7 @@ internal object CarPlayScreenProbe {
     private const val MAIN_SCREEN = CarPlayDisplay.MAIN_SCREEN
     private const val FIRST_KEY_FRAME_TIMEOUT_MS = 8_000L
     private const val VIDEO_WRITE_TIMEOUT_MS = 5_000L
+    private val FORMAT_REJECTIONS = setOf(400, 406, 415, 451, 456, 461)
 
     fun run(
         host: InetAddress,
@@ -44,14 +45,16 @@ internal object CarPlayScreenProbe {
         onStage: (String) -> Unit,
         protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
         readResolutionOnly: Boolean = false,
+        receiverPort: Int = 7000,
+        mguHealth: MguWifiHealth? = null,
+        power: () -> Iap2PowerStatus = { Iap2PowerStatus() },
     ): String = CarPlayTiming(host, sockets.openDatagram()).use { timing ->
         require(bluetoothAddress.matches(deviceId))
         val sessionUuid = UUID.randomUUID()
-        val sessionTarget = if (protocol.isVehicle) {
-            val address = host.hostAddress ?: throw ProtocolException("连接缺少车机地址")
-            val authority = if (':' in address) "[${address.replace("%", "%25")}]" else address
-            "rtsp://$authority/${sessionUuid.mostSignificantBits.toULong()}"
-        } else "/"
+        val address = host.hostAddress ?: throw ProtocolException("连接缺少车机地址")
+        val authority = if (':' in address) "[${address.replace("%", "%25")}]" else address
+        val sessionTarget = if (protocol.isVehicle) "rtsp://$authority/${sessionUuid.mostSignificantBits.toULong()}" else "/"
+        val audioTarget = if (protocol.isVehicle) "rtsp://$authority:$receiverPort/" else "/"
         fun record() {
             if (protocol.isVehicle) {
                 val reply = control.request("RECORD", sessionTarget, plistHeaders)
@@ -70,7 +73,7 @@ internal object CarPlayScreenProbe {
             put("model", Build.MODEL)
             put("osName", "Android")
             put("osVersion", Build.VERSION.RELEASE)
-            put("sourceVersion", if (protocol == ReceiverProtocol.VOLKSWAGEN) VolkswagenInvitation.SOURCE_VERSION else "540.31")
+            put("sourceVersion", if (protocol == ReceiverProtocol.VOLKSWAGEN) CarPlayControlInvitation.SOURCE_VERSION else "540.31")
             put("sessionUUID", sessionUuid.toString().uppercase(Locale.ROOT))
             if (protocol.isVehicle) put("macAddress", deviceId.uppercase(Locale.ROOT))
             put("sessionCorrelationUUID", UUID.randomUUID().toString().uppercase(Locale.ROOT))
@@ -106,70 +109,69 @@ internal object CarPlayScreenProbe {
         val keepAlivePort = (sessionReply.objectForKey("keepAlivePort") as? NSNumber)
             ?.takeIf { it.isInteger }?.longValue()?.takeIf { it in 1L..65_535L }?.toInt()
         connect(sockets, host, eventPort).use { events ->
-            val resources = if (protocol.isVehicle) VehicleScreenResources(receiverInfo, protocol, sockets::close) else null
+            val resources = if (protocol.isVehicle) VehicleScreenResources(receiverInfo, protocol) else null
+            val mgu = protocol.isBmw && (receiverInfo.objectForKey("model") as? NSString)
+                ?.content?.let { it == "MGU" || it.startsWith("MGU-") } == true
+            val handoff = if (mgu) MguBluetoothHandoff(control, deviceId) else null
             CarPlayTouchEvents(
                 events, keys, control, resolution.width, resolution.height, certificate,
-                sockets::close, onStage, resources?.let { state -> state::onCommand }, protocol,
+                sockets::close, onStage, resources?.let { state -> state::onCommand }, protocol, power,
+                onNetworkIapAuthenticated = { if (mgu) mguHealth?.ready() },
             ).start()
-            val heartbeat = if (protocol.isVehicle) startHeartbeat(control, sockets, events, host, keepAlivePort) else null
+            val heartbeat = if (protocol.isVehicle) startHeartbeat(control, sockets, events, host, keepAlivePort, if (mgu) mguHealth else null) else null
             try {
-                if (protocol == ReceiverProtocol.BMW_MGU || protocol == ReceiverProtocol.VOLKSWAGEN) record()
-                resources?.declareAndClaim(control)
-                resources?.requireScreen()
+                fun startAudio(beforeStart: () -> Unit = {}): java.io.Closeable {
+                    val streams = mutableListOf<java.io.Closeable>()
+                    fun closeAudio() = streams.asReversed().forEach { runCatching { it.close() } }
+                    try {
+                        val audio = openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio,
+                            audioTarget, navigation = false)?.also(streams::add)
+                        val navigation = openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio,
+                            audioTarget, navigation = true)?.also(streams::add)
+                        val microphone = if (preferences.useCarMicrophone) {
+                            CarPlayMicrophone.open(receiverInfo, control, keys, sockets, host, audioTarget)?.also(streams::add)
+                        } else null
+                        beforeStart()
+                        microphone?.start()
+                        audio?.start()
+                        navigation?.start()
+                        return java.io.Closeable(::closeAudio)
+                    } catch (failure: Exception) {
+                        closeAudio()
+                        throw failure
+                    }
+                }
+
+                if (resources != null) {
+                    record()
+                    resources.publish(control)
+                    resources.claimInitial()
+                    var audio: java.io.Closeable? = null
+                    try {
+                        return runVehicleScreen(control, sockets, events, host, display.uuid, sessionTarget, protocol,
+                            keys, codec, resources, onStreamStarted, onStage,
+                            ensureAudio = {
+                                handoff?.request()
+                                if (audio == null) audio = startAudio()
+                            })
+                    } finally {
+                        audio?.close()
+                    }
+                }
 
                 onStage("事件通道已连接，正在协商主屏视频")
-                val connectionId = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
-                val stream = NSDictionary().apply {
-                    put("type", MAIN_SCREEN)
-                    put("streamConnectionID", connectionId)
-                    put("uuid", display.uuid)
-                    put("latencyMs", if (protocol == ReceiverProtocol.BMW_MGU) 75 else 25)
-                }
-                val request = NSDictionary().apply {
-                    put("streams", NSArray(1).apply { setValue(0, stream) })
-                }
-                val reply = if (protocol == ReceiverProtocol.BMW_MGU && resources != null) {
-                    val body = BinaryPropertyListWriter.writeToArray(request)
-                    val first = control.request("SETUP", sessionTarget, plistHeaders, body)
-                    val response = if (first.status == 400 && resources.awaitUiRequest()) {
-                        resources.requireScreen()
-                        control.request("SETUP", sessionTarget, plistHeaders, body)
-                    } else first
-                    if (response.status !in 200..299) {
-                        throw ProtocolException("主屏 SETUP 失败（RTSP ${response.status}）")
-                    }
-                    parse(response.body)
-                } else {
-                    parse(request(control, "SETUP", sessionTarget, request))
-                }
-                val streams = reply.objectForKey("streams") as? NSArray
-                val screen = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
-                    (it.objectForKey("type") as? NSNumber)?.longValue() == MAIN_SCREEN.toLong()
-                } ?: throw ProtocolException("接收端未返回主屏流")
-                val dataPort = port(screen, "dataPort")
+                val connectionId = nextVideoConnectionId()
+                val dataPort = setupScreen(control, sessionTarget, display.uuid, connectionId, 25)
                 connect(sockets, host, dataPort).use { video ->
-                    resources?.startScreen()
-                    openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = false).use { audio ->
-                        openAudio(receiverInfo, host, control, keys, sockets, preferences, onAudio, navigation = true).use { navigation ->
-                            val microphone = if (preferences.useCarMicrophone) {
-                                CarPlayMicrophone.open(receiverInfo, control, keys, sockets, host)
-                            } else null
-                            microphone.use {
-                                if (!protocol.isVehicle) record()
-                                microphone?.start()
-                                audio?.start()
-                                navigation?.start()
-                                val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
-                                if (!CarlifeConnectService.state.value.active) return connected
-                                onStage(connected)
-                                val videoHeartbeat = if (heartbeat == null) {
-                                    startHeartbeat(control, sockets, video, host, keepAlivePort)
-                                } else null
-                                try {
-                                    return sendVideo(video, keys.video(connectionId), codec, onStreamStarted, onStage)
-                                } finally {
-                                    videoHeartbeat?.interrupt()
-                                }
+                    return startAudio(::record).use {
+                        val connected = "主屏视频 TCP 已连接，RECORD 已确认 · TCP $dataPort"
+                        if (!CarlifeConnectService.state.value.active) connected else {
+                            onStage(connected)
+                            val videoHeartbeat = startHeartbeat(control, sockets, video, host, keepAlivePort)
+                            try {
+                                sendVideo(video, keys.video(connectionId), codec, onStreamStarted, onStage)
+                            } finally {
+                                videoHeartbeat.interrupt()
                             }
                         }
                     }
@@ -180,16 +182,129 @@ internal object CarPlayScreenProbe {
         }
     }
 
+    internal fun runVehicleScreen(
+        control: RtspControl, sockets: CarPlaySockets, events: Socket, host: InetAddress,
+        uuid: String, target: String, protocol: ReceiverProtocol, keys: CarPlaySessionKeys,
+        codec: VideoCodec, resources: VehicleScreenResources, onStreamStarted: () -> Unit, onStage: (String) -> Unit,
+        ensureAudio: () -> Unit = {},
+        keepRunning: () -> Boolean = { CarlifeConnectService.state.value.active },
+        pump: (Socket, ByteArray, VideoCodec, () -> Unit, (String) -> Unit, () -> Unit) -> String = ::sendVideo,
+    ): String {
+        var announced = -1L
+        var failedRevision: Long? = null
+        var started = false
+        var waiting = false
+        while (!events.isClosed && keepRunning()) {
+            val snapshot = resources.snapshot()
+            if (snapshot.revision != announced) {
+                resources.publish(control)
+                announced = snapshot.revision
+            }
+            if (!snapshot.owned || failedRevision == snapshot.revision) {
+                ensureAudio()
+                if (!waiting) onStage("车机会话仍在运行 · 等待车机恢复主屏")
+                waiting = true
+                resources.waitForChange(snapshot)
+                continue
+            }
+            if (!resources.allows(snapshot)) continue
+            waiting = false
+
+            val id = nextVideoConnectionId()
+            var negotiated = false
+            var startingAudio = false
+            var video: Socket? = null
+            try {
+                val stream = screenStream(uuid, id, if (protocol.isBmw) 75 else 25)
+                val response = control.request("SETUP", target, plistHeaders, BinaryPropertyListWriter.writeToArray(stream))
+                if (response.status in FORMAT_REJECTIONS) {
+                    ProjectionLog.event("车机暂未接受主屏 SETUP · RTSP ${response.status}")
+                    failedRevision = snapshot.revision
+                    continue
+                }
+                negotiated = response.status in 200..299
+                val dataPort = screenPort(response)
+                if (!resources.allows(snapshot)) continue
+                val connected = connect(sockets, host, dataPort)
+                video = connected
+                if (!resources.install(snapshot, connected)) continue
+                startingAudio = true
+                ensureAudio()
+                startingAudio = false
+                if (!resources.allows(snapshot)) continue
+                onStage("主屏视频 TCP 已连接 · TCP $dataPort")
+                pump(connected, keys.video(id), codec, {
+                    if (!started) {
+                        started = true
+                        onStreamStarted()
+                    }
+                }, onStage, {
+                    val current = resources.snapshot()
+                    if (current.grant == snapshot.grant && current.revision != announced) {
+                        resources.publish(control)
+                        announced = current.revision
+                    }
+                })
+                if (resources.allows(snapshot)) failedRevision = snapshot.revision
+            } catch (failure: IOException) {
+                if (startingAudio || !negotiated || events.isClosed) throw failure
+                if (resources.allows(snapshot)) {
+                    ProjectionLog.failure("主屏视频流结束，保留控制会话等待恢复", failure)
+                    failedRevision = snapshot.revision
+                }
+            } finally {
+                video?.let {
+                    resources.detach(it)
+                    sockets.release(it)
+                }
+                if (negotiated && !events.isClosed) {
+                    // Close only the type-110 stream. Audio and the session RECORD remain active.
+                    val stream = NSDictionary().apply { put("type", MAIN_SCREEN); put("uuid", uuid) }
+                    val body = NSDictionary().apply { put("streams", NSArray(stream)) }
+                    request(control, "TEARDOWN", target, body)
+                    ProjectionLog.event("已释放主屏视频流 · 保留控制和音频")
+                }
+            }
+        }
+        if (events.isClosed && keepRunning()) throw IOException("CarPlay 事件通道已关闭")
+        return "投屏已结束"
+    }
+
+    private fun nextVideoConnectionId(): Long = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
+
+    private fun screenStream(uuid: String, connectionId: Long, latency: Int): NSDictionary {
+        val stream = NSDictionary().apply {
+            put("type", MAIN_SCREEN)
+            put("streamConnectionID", connectionId)
+            put("uuid", uuid)
+            put("latencyMs", latency)
+        }
+        return NSDictionary().apply { put("streams", NSArray(stream)) }
+    }
+
+    private fun setupScreen(control: RtspControl, target: String, uuid: String, id: Long, latency: Int): Int =
+        screenPort(control.request("SETUP", target, plistHeaders, BinaryPropertyListWriter.writeToArray(screenStream(uuid, id, latency))))
+
+    private fun screenPort(response: RtspResponse): Int {
+        if (response.status !in 200..299) throw ProtocolException("主屏 SETUP 失败（RTSP ${response.status}）")
+        val streams = parse(response.body).objectForKey("streams") as? NSArray
+        val screen = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
+            (it.objectForKey("type") as? NSNumber)?.takeIf { value -> value.isInteger }?.longValue() == MAIN_SCREEN.toLong()
+        } ?: throw ProtocolException("接收端未返回主屏流")
+        return port(screen, "dataPort")
+    }
+
     internal fun startHeartbeat(
         control: RtspControl, sockets: CarPlaySockets, video: Socket, host: InetAddress, keepAlivePort: Int?,
+        mguHealth: MguWifiHealth? = null,
     ): Thread = Thread({
         try {
             val ping = keepAlivePort?.let { DatagramPacket(ByteArray(4), 4, host, it) }
             val random = if (ping != null) SecureRandom() else null
-            val interval = if (ping != null) 1_000L else 3_000L
+            val interval = if (ping != null || mguHealth != null) 1_000L else 3_000L
             (ping?.let { sockets.openDatagram() }).use { udp ->
                 var nextPing = System.nanoTime()
-                var feedback = ping != null
+                var feedback = ping != null || mguHealth != null
                 if (!feedback) Thread.sleep(interval)
                 while (!video.isClosed && !Thread.currentThread().isInterrupted) {
                     val now = System.nanoTime()
@@ -199,6 +314,7 @@ internal object CarPlayScreenProbe {
                         nextPing = now + 5_000_000_000L
                     }
                     val reply = if (feedback) control.request("POST", "/feedback") else control.request("OPTIONS", "*")
+                    if (feedback) mguHealth?.feedback(reply.status)
                     if (feedback && (reply.status == 404 || reply.status == 405 || reply.status == 501)) {
                         feedback = false
                     } else if (reply.status in 500..599) {
@@ -220,7 +336,7 @@ internal object CarPlayScreenProbe {
     private fun openAudio(
         info: NSDictionary, host: InetAddress, control: RtspControl, keys: CarPlaySessionKeys,
         sockets: CarPlaySockets, preferences: ProjectionPreferences,
-        onAudio: (Boolean, CarPlayAudioInfo) -> Unit, navigation: Boolean,
+        onAudio: (Boolean, CarPlayAudioInfo) -> Unit, target: String, navigation: Boolean,
     ): CarPlayMediaAudio? {
         val audioType = if (navigation) "alert" else "media"
         val formats = info.objectForKey("audioFormats") as? NSArray ?: run {
@@ -230,76 +346,79 @@ internal object CarPlayScreenProbe {
         val media = formats.array.filterIsInstance<NSDictionary>().filter {
             (it.objectForKey("audioType") as? NSString)?.content == audioType
         }
-        fun mask(type: Int): Int = media.firstOrNull {
-            (it.objectForKey("type") as? NSNumber)?.intValue() == type
-        }?.let { (it.objectForKey("audioOutputFormats") as? NSNumber)?.intValue() } ?: 0
+        fun mask(type: Int): Long = media.asSequence()
+            .filter { (it.objectForKey("type") as? NSNumber)?.takeIf { value -> value.isInteger }?.longValue() == type.toLong() }
+            .mapNotNull { (it.objectForKey("audioOutputFormats") as? NSNumber)?.takeIf { value -> value.isInteger }?.longValue() }
+            .fold(0L) { combined, formats -> combined or formats }
         val aacMask = mask(CarPlayMediaAudio.AAC_TYPE)
         val pcmMask = mask(CarPlayMediaAudio.PCM_TYPE)
         val mediaAac = when {
-            aacMask and 0x800000 != 0 -> 0x800000 to 48_000
-            aacMask and 0x400000 != 0 -> 0x400000 to 44_100
+            aacMask and 0x800000L != 0L -> 0x800000 to 48_000
+            aacMask and 0x400000L != 0L -> 0x400000 to 44_100
             else -> null
         }
         val mediaPcm = when {
-            pcmMask and 0x800 != 0 -> 0x800 to 44_100
-            pcmMask and 0x8000 != 0 -> 0x8000 to 48_000
+            pcmMask and 0x800L != 0L -> 0x800 to 44_100
+            pcmMask and 0x8000L != 0L -> 0x8000 to 48_000
             else -> null
         }
-        val selected = if (navigation) when {
-            pcmMask and 0x4000 != 0 -> 0x4000 to 48_000
-            pcmMask and 0x400 != 0 -> 0x400 to 44_100
-            pcmMask and 0x10 != 0 -> 0x10 to 16_000
+        val candidates = if (navigation) listOfNotNull(when {
+            pcmMask and 0x4000L != 0L -> 0x4000 to 48_000
+            pcmMask and 0x400L != 0L -> 0x400 to 44_100
+            pcmMask and 0x10L != 0L -> 0x10 to 16_000
             else -> null
-        } else {
-            if (preferences.audioPreference == AudioPreference.PCM) mediaPcm ?: mediaAac
-            else mediaAac ?: mediaPcm
+        }) else {
+            if (preferences.audioPreference == AudioPreference.PCM) listOfNotNull(mediaPcm, mediaAac)
+            else listOfNotNull(mediaAac, mediaPcm)
         }
-        if (selected == null) {
+        if (candidates.isEmpty()) {
             ProjectionLog.event("无可用音频格式 · stream=$audioType AAC=0x${aacMask.toString(16)} PCM=0x${pcmMask.toString(16)}")
             return null
         }
-        val (format, rate) = selected
-        val aac = format >= 0x400000
-        val bufferMs = if (navigation) preferences.navigationBufferMs ?: 100
-            else preferences.mediaBufferMs ?: if (aac) 350 else 120
-        val channels = if (navigation) 1 else 2
-        val type = if (aac) CarPlayMediaAudio.AAC_TYPE else CarPlayMediaAudio.PCM_TYPE
-        val id = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
-        val stream = NSDictionary().apply {
-            put("type", type)
-            put("audioType", audioType)
-            put("audioFormat", format)
-            put("audioLatencyMs", bufferMs)
-            put("streamConnectionID", id)
+        for ((format, rate) in candidates) {
+            val aac = format >= 0x400000
+            val bufferMs = if (navigation) preferences.navigationBufferMs ?: 100
+                else preferences.mediaBufferMs ?: if (aac) 350 else 120
+            val channels = if (navigation) 1 else 2
+            val type = if (aac) CarPlayMediaAudio.AAC_TYPE else CarPlayMediaAudio.PCM_TYPE
+            val id = (SecureRandom().nextLong() ushr 1).coerceAtLeast(1)
+            val stream = NSDictionary().apply {
+                put("type", type)
+                put("audioType", audioType)
+                put("audioFormat", format)
+                put("audioLatencyMs", bufferMs)
+                put("streamConnectionID", id)
+            }
+            val body = NSDictionary().apply {
+                put("streams", NSArray(1).apply { setValue(0, stream) })
+            }
+            val result = control.request("SETUP", target, plistHeaders, BinaryPropertyListWriter.writeToArray(body))
+            if (result.status in FORMAT_REJECTIONS || navigation && result.status in 400..499 && result.status !in 401..403) {
+                ProjectionLog.event("车机拒绝可选音频 · stream=$audioType format=$format · RTSP ${result.status}")
+                continue
+            }
+            if (result.status !in 200..299) throw ProtocolException("音频 SETUP 失败（RTSP ${result.status}）")
+            val reply = parse(result.body)
+            val streams = reply.objectForKey("streams") as? NSArray
+            val response = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
+                val streamId = it.objectForKey("streamConnectionID")
+                (it.objectForKey("type") as? NSNumber)?.takeIf { value -> value.isInteger }?.longValue() == type.toLong() &&
+                    (streamId == null || streamId is NSNumber && streamId.isInteger && streamId.longValue() == id)
+            } ?: run {
+                ProjectionLog.event("车机 SETUP 未返回匹配音频流 · stream=$audioType format=$format")
+                return null
+            }
+            val dataPort = port(response, "dataPort")
+            return CarPlayMediaAudio(
+                sockets.openDatagram(), host, dataPort, keys.video(id), rate, aac,
+                stream = if (navigation) 2 else 1, outputChannels = channels,
+            ).also {
+                val codec = if (aac) "AAC-LC" else "PCM"
+                ProjectionLog.event("音频协商成功 · $audioType · $codec · $rate Hz · ${channels} 声道 · ${bufferMs} ms")
+                onAudio(navigation, CarPlayAudioInfo(codec, rate, channels, bufferMs, dataPort))
+            }
         }
-        val body = NSDictionary().apply {
-            put("streams", NSArray(1).apply { setValue(0, stream) })
-        }
-        val reply = try {
-            parse(request(control, "SETUP", "/", body))
-        } catch (failure: ProtocolException) {
-            ProjectionLog.failure("音频 SETUP 失败 · stream=$audioType format=$format", failure)
-            if (!navigation) throw failure
-            android.util.Log.w("CarNatAudio", "Receiver did not negotiate navigation audio", failure)
-            return null
-        }
-        val streams = reply.objectForKey("streams") as? NSArray
-        val response = streams?.array?.filterIsInstance<NSDictionary>()?.firstOrNull {
-            (it.objectForKey("type") as? NSNumber)?.intValue() == type &&
-                (it.objectForKey("streamConnectionID") as? NSNumber)?.longValue()?.let { it == id } != false
-        } ?: run {
-            ProjectionLog.event("车机 SETUP 未返回匹配音频流 · stream=$audioType format=$format")
-            return null
-        }
-        val dataPort = port(response, "dataPort")
-        return CarPlayMediaAudio(
-            sockets.openDatagram(), host, dataPort, keys.video(id), rate, aac,
-            stream = if (navigation) 2 else 1, outputChannels = channels,
-        ).also {
-            val codec = if (aac) "AAC-LC" else "PCM"
-            ProjectionLog.event("音频协商成功 · $audioType · $codec · $rate Hz · ${channels} 声道 · ${bufferMs} ms")
-            onAudio(navigation, CarPlayAudioInfo(codec, rate, channels, bufferMs, dataPort))
-        }
+        return null
     }
 
     internal fun negotiateVideoCodec(
@@ -309,7 +428,7 @@ internal object CarPlayScreenProbe {
         if (offered) session.put("features", NSArray(NSString("hevc")))
         fun setup() = control.request("SETUP", target, plistHeaders, BinaryPropertyListWriter.writeToArray(session))
         var response = setup()
-        if (offered && response.status in setOf(400, 406, 415, 451, 456, 461)) {
+        if (offered && response.status in FORMAT_REJECTIONS) {
             session.remove("features")
             offered = false
             ProjectionLog.event("车机拒绝 HEVC 会话提议，改用 H.264")
@@ -328,6 +447,7 @@ internal object CarPlayScreenProbe {
         negotiatedCodec: VideoCodec,
         onStreamStarted: () -> Unit,
         onStage: (String) -> Unit,
+        onTick: () -> Unit = {},
     ): String {
         val feed = CarWithVideoFeed.subscribe()
         val writeStartedNs = AtomicLong()
@@ -365,6 +485,7 @@ internal object CarPlayScreenProbe {
             var lastPtsUs = 0L
             var lastCodec: VideoCodec? = null
             while (!video.isClosed && CarlifeConnectService.state.value.active) {
+                onTick()
                 val now = SystemClock.elapsedRealtime()
                 if (frames == 0L && CarlifeConnectService.state.value.phase == CapturePhase.RECEIVING) {
                     if (keyFrameDeadline == Long.MAX_VALUE) keyFrameDeadline = now + FIRST_KEY_FRAME_TIMEOUT_MS
@@ -450,7 +571,7 @@ internal object CarPlayScreenProbe {
             socket.connect(InetSocketAddress(host, port), 5_000)
             return socket
         } catch (failure: Exception) {
-            runCatching { socket.close() }
+            sockets.release(socket)
             throw failure
         }
     }

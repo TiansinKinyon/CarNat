@@ -46,6 +46,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        com.baidu.carlife.xiaomi.carplay.VolkswagenWifiWake.checkWhenResumed()
+    }
+
     private fun openCarWith() {
         val entry = ComponentName("com.miui.carlink", "com.miui.carlink.castfwk.usb.CarlifeAdbActivity")
         try {

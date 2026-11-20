@@ -57,6 +57,12 @@ internal class CarPlaySockets : Closeable {
     }
 
     @Synchronized
+    fun release(socket: Socket) {
+        sockets.remove(socket)
+        runCatching { socket.close() }
+    }
+
+    @Synchronized
     override fun close() {
         closed = true
         sockets.forEach { runCatching { it.close() } }

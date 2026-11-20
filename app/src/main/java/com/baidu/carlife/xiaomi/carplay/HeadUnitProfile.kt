@@ -16,7 +16,7 @@ internal enum class HeadUnitProfile(val id: String, val label: String, val summa
 
     companion object {
         fun load(context: Context): HeadUnitProfile {
-            val id = settings(context).getString("profile", null)
+            val id = settings(context).all["profile"] as? String
             return entries.firstOrNull { it.id == id } ?: GENERIC
         }
 
@@ -40,4 +40,11 @@ internal enum class ReceiverProtocol {
 
     val isBmw get() = this == BMW_MGU
     val isVehicle get() = this != GENERIC
+
+    fun forReceiver(vararg identities: String?): ReceiverProtocol =
+        if (isBmw && identities.any { identity ->
+                identity?.contains("diplay", ignoreCase = true) == true ||
+                    identity?.contains("winplay", ignoreCase = true) == true
+            }
+        ) GENERIC else this
 }

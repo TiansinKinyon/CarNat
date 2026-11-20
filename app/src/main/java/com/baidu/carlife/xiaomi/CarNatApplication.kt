@@ -7,5 +7,6 @@ class CarNatApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         ProjectionLog.initialize(this)
+        com.baidu.carlife.xiaomi.carplay.VolkswagenWifiWake.start(this)
     }
 }

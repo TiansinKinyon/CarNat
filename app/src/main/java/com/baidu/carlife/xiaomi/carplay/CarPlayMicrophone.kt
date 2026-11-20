@@ -118,6 +118,7 @@ internal class CarPlayMicrophone private constructor(
             keys: CarPlaySessionKeys,
             sockets: CarPlaySockets,
             host: InetAddress,
+            target: String = "/",
         ): CarPlayMicrophone? {
             val formats = info.objectForKey("audioFormats") as? NSArray
             val supported = formats?.array?.filterIsInstance<NSDictionary>()?.any {
@@ -149,14 +150,16 @@ internal class CarPlayMicrophone private constructor(
             val body = NSDictionary().apply { put("streams", NSArray(1).apply { setValue(0, stream) }) }
             return try {
                 val reply = control.request(
-                    "SETUP", "/", mapOf("Content-Type" to "application/x-apple-binary-plist"),
+                    "SETUP", target, mapOf("Content-Type" to "application/x-apple-binary-plist"),
                     BinaryPropertyListWriter.writeToArray(body),
                 )
                 if (reply.status !in 200..299) throw ProtocolException("Microphone SETUP returned ${reply.status}")
                 val streams = CarPlayPlist.readDictionary(reply.body).objectForKey("streams") as? NSArray
                 val accepted = streams?.array?.filterIsInstance<NSDictionary>()?.any {
-                    (it.objectForKey("type") as? NSNumber)?.intValue() == CarPlayMediaAudio.PCM_TYPE &&
-                        (it.objectForKey("streamConnectionID") as? NSNumber)?.longValue()?.let { it == id } != false
+                    val streamId = it.objectForKey("streamConnectionID")
+                    (it.objectForKey("type") as? NSNumber)?.takeIf { value -> value.isInteger }?.longValue() ==
+                        CarPlayMediaAudio.PCM_TYPE.toLong() &&
+                        (streamId == null || streamId is NSNumber && streamId.isInteger && streamId.longValue() == id)
                 } == true
                 if (!accepted) throw ProtocolException("Receiver did not return the microphone stream")
                 ProjectionLog.event("车机麦克风 · 已协商语音上行，等待 PCM")

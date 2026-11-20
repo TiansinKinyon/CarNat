@@ -29,10 +29,14 @@ internal data class ReceiverSettings(val name: String = "", val address: String 
 
         private fun preferences(context: Context) = context.getSharedPreferences("receiver_settings", Context.MODE_PRIVATE)
 
-        fun load(context: Context): ReceiverSettings = preferences(context).let {
-            ReceiverSettings(it.getString("name", "").orEmpty(), it.getString("address", "").orEmpty(),
-                it.getString("pin", "").orEmpty().takeUnless { code -> code == "3939" }.orEmpty(),
-                it.getString("receiverAddress", "").orEmpty())
+        fun load(context: Context): ReceiverSettings {
+            val values = preferences(context).all
+            fun read(key: String) = (values[key] as? String).orEmpty()
+            return ReceiverSettings(
+                read("name"), read("address"),
+                read("pin").takeIf { it != "3939" && validPin(it) }.orEmpty(),
+                read("receiverAddress"),
+            )
         }
     }
 }

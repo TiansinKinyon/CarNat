@@ -49,12 +49,15 @@ internal class BluetoothReceiverProbe(
     private val discovery: NsdManager? = null,
     private val pairingDirectory: File? = null,
     private val hasConfiguredPhoneAddress: Boolean = false,
+    private val context: android.content.Context? = null,
+    private val volkswagenWakeNetwork: Network? = null,
+    private val power: () -> Iap2PowerStatus = { Iap2PowerStatus() },
 ) : Closeable {
     private var wifiRequest: Closeable? = null
     private var sockets: CarPlaySockets? = null
     private var server: BluetoothServerSocket? = null
     private var discoveryMarker: BluetoothServerSocket? = null
-    private var volkswagenInvitation: VolkswagenInvitation? = null
+    private var controlInvitation: CarPlayControlInvitation? = null
     private var peer: BluetoothSocket? = null
     @Volatile private var closed = false
 
@@ -232,41 +235,76 @@ internal class BluetoothReceiverProbe(
             if (receiverAddress.isEmpty() || adapter.bondedDevices.none { it.address.equals(receiverAddress, ignoreCase = true) }) {
                 throw IOException("请先选择已配对的大众车机")
             }
-            val network = currentVolkswagenWifi() ?: throw IOException("请先连接大众车机 Wi-Fi")
+            val network = volkswagenWakeNetwork ?: awaitVolkswagenWifi(acceptTimeout, onStage)
             val link = connectivity.getLinkProperties(network) ?: throw IOException("无法读取车机 Wi-Fi 网络")
             val localAddress = link.linkAddresses.firstOrNull { it.address is Inet4Address }?.address
                 ?: throw IOException("大众车机 Wi-Fi 未分配 IPv4 地址")
             attempt.useNetwork(network, link.interfaceName)
             synchronized(this) {
                 if (closed) throw IOException("CarPlay 会话已停止")
-                VolkswagenInvitation(connectivity, discovery, network, localAddress, deviceId).also {
-                    volkswagenInvitation = it
+                CarPlayControlInvitation(connectivity, discovery, network, localAddress, deviceId).also {
+                    controlInvitation = it
                     it.start()
                 }
             }
         } else null
-        onStage(if (receiverName.isBlank()) "正在等待已配对车机连接" else "正在等待配对设备 $receiverName 连接")
+        val volkswagenPeer = if (invitation != null) pairingDirectory?.let {
+            VolkswagenPeerStore(it, deviceId, receiverAddress)
+        } else null
+        val savedCertificate = volkswagenPeer?.takeUnless { readResolutionOnly }?.read()
+        val savedPairing = savedCertificate?.let {
+            pairingDirectory?.let { directory ->
+                VehiclePairingStore(directory, deviceId, receiverAddress.uppercase(java.util.Locale.ROOT), it,
+                    ReceiverProtocol.VOLKSWAGEN)
+            }
+        }?.takeIf { it.read() != null }
+
+        fun tryRestore(): Boolean {
+            if (Build.VERSION.SDK_INT < 33 || invitation == null || savedCertificate == null ||
+                savedPairing == null
+            ) return false
+            val invited = invitation.peek() ?: return false
+            return restoreVolkswagen(
+                invitation, invited, savedCertificate, savedPairing, attempt, receiverAddress, receiverName, pin, deviceId,
+                onStreamStarted, onResolution, onDiagnostics, preferences, onStage,
+            )
+        }
+
+        onStage(if (savedPairing != null) "正在等待已配对大众车机本轮 Wi-Fi 或蓝牙连接"
+            else if (receiverName.isBlank()) "正在等待已配对车机连接" else "正在等待配对设备 $receiverName 连接")
         ProjectionLog.event("蓝牙 RFCOMM · 监听窗口=${acceptTimeout}ms")
         val listeningSince = SystemClock.elapsedRealtime()
         var outbound = false
         val connection = if (invitation == null) {
             listener.accept(acceptTimeout)
         } else {
-            val inboundWindow = minOf(8_000, acceptTimeout)
-            try {
-                listener.accept(inboundWindow)
-            } catch (failure: IOException) {
-                if (closed || acceptTimeout <= inboundWindow) throw failure
-                val dialed = dialVolkswagen(adapter.getRemoteDevice(receiverAddress), minOf(8_000, acceptTimeout - inboundWindow))
-                if (dialed != null) {
-                    outbound = true
-                    dialed
+            val inboundDeadline = listeningSince + minOf(8_000, acceptTimeout)
+            val deadline = listeningSince + acceptTimeout
+            var accepted: BluetoothSocket? = null
+            var dialAttempted = false
+            var lastFailure: IOException? = null
+            while (accepted == null && !closed && SystemClock.elapsedRealtime() < deadline) {
+                if (tryRestore()) return
+                val now = SystemClock.elapsedRealtime()
+                val remaining = deadline - now
+                if (remaining <= 0) break
+                if (!dialAttempted && now >= inboundDeadline) {
+                    dialAttempted = true
+                    accepted = dialVolkswagen(adapter.getRemoteDevice(receiverAddress), minOf(8_000L, remaining).toInt())
+                    outbound = accepted != null
                 } else {
-                    val remaining = acceptTimeout - (SystemClock.elapsedRealtime() - listeningSince)
-                    if (remaining <= 0) throw failure
-                    listener.accept(remaining.toInt())
+                    val window = if (!dialAttempted) minOf(inboundDeadline - now, remaining) else remaining
+                    val wait = if (savedPairing != null) minOf(window, 1_500L) else window
+                    val acceptStarted = SystemClock.elapsedRealtime()
+                    try {
+                        accepted = listener.accept(wait.coerceAtLeast(1).toInt())
+                    } catch (failure: IOException) {
+                        if (closed || SystemClock.elapsedRealtime() - acceptStarted + 100 < wait) throw failure
+                        lastFailure = failure
+                    }
                 }
             }
+            accepted ?: throw lastFailure ?: IOException("等待大众车机连接超时")
         }
         ProjectionLog.event("蓝牙 RFCOMM · 已接受连接 · 用时=${SystemClock.elapsedRealtime() - listeningSince}ms")
         synchronized(this) {
@@ -316,22 +354,46 @@ internal class BluetoothReceiverProbe(
         }
         val timer = android.os.Handler(android.os.Looper.getMainLooper())
         timer.postDelayed(timeout, 45_000)
-        var waitingForBmwWindow = false
+        val waitingForBmwWindow = java.util.concurrent.atomic.AtomicBoolean()
+        fun exchange(onBmwEndpoint: ((Iap2LinkProbe.Endpoint) -> Unit)? = null) = Iap2LinkProbe.run(
+            connection.inputStream, connection.outputStream,
+            onWifi = { wifi ->
+                publishWifi(wifi)
+                requestWifi(wifi)
+            },
+            profile = profile,
+            deviceId = deviceId,
+            onBmwAppsWindow = waitingForBmwWindow::set,
+            initiateLink = outbound,
+            power = power,
+            onBmwEndpoint = onBmwEndpoint,
+            onStage = onStage,
+        )
         val endpoint = try {
-            Iap2LinkProbe.run(
-                connection.inputStream, connection.outputStream,
-                onWifi = { wifi ->
-                    publishWifi(wifi)
-                    requestWifi(wifi)
-                },
-                profile = profile,
-                deviceId = deviceId,
-                onBmwAppsWindow = { waitingForBmwWindow = it },
-                initiateLink = outbound,
-                onStage = onStage,
-            )
+            if (profile == HeadUnitProfile.BMW) {
+                val ready = java.util.concurrent.CompletableFuture<Iap2LinkProbe.Endpoint>()
+                Thread({
+                    try {
+                        ready.complete(exchange { ready.complete(it) })
+                    } catch (failure: Exception) {
+                        if (!ready.completeExceptionally(failure) && synchronized(this) { !closed && peer === connection }) {
+                            ProjectionLog.failure("宝马蓝牙控制链路已结束", failure)
+                        }
+                    }
+                }, "BMW Bluetooth iAP2").apply { isDaemon = true; start() }
+                try {
+                    ready.get(46, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (failure: java.util.concurrent.ExecutionException) {
+                    throw failure.cause ?: failure
+                } catch (failure: java.util.concurrent.TimeoutException) {
+                    throw IOException("宝马蓝牙端点等待超时", failure)
+                } catch (failure: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw java.io.InterruptedIOException("已停止等待宝马蓝牙端点").apply { initCause(failure) }
+                }
+            } else exchange()
         } catch (failure: IOException) {
-            if (waitingForBmwWindow && failure !is ProtocolException) throw BmwWindowPending(failure)
+            if (waitingForBmwWindow.get() && failure !is ProtocolException) throw BmwWindowPending(failure)
             throw failure
         } finally {
             awaitingEndpoint.set(false)
@@ -369,6 +431,7 @@ internal class BluetoothReceiverProbe(
                 onStage("正在等待大众车机本轮 CarPlay 邀请")
                 val advertisedHost = endpoint.host?.let(attempt::resolve)
                 val invitedHost = invitation.await(advertisedHost)
+                    ?: throw IOException("未收到本轮大众 CarPlay 邀请，请在车机上启动 Apple CarPlay")
                 val advertisedPort = endpoint.port ?: if (Build.VERSION.SDK_INT >= 34) {
                     CarAirPlayDiscovery.findAdvertised(discovery, invitation.network)
                         ?.takeIf { attempt.resolve(it.first) == invitedHost }?.second
@@ -388,41 +451,202 @@ internal class BluetoothReceiverProbe(
                 val network = vehicleNetwork ?: throw IOException("车机未提供端点，且没有已绑定的车机热点")
                 val link = vehicleLink ?: throw IOException("无法读取车机热点地址")
                 onStage("正在发现宝马 AirPlay 服务")
-                CarAirPlayDiscovery.find(discovery, network, link)
+                discoverBmwEndpoint(network, link, deviceId)
             }
             diagnostics = diagnostics.copy(host = address.first, port = address.second)
             onDiagnostics(diagnostics)
+            val mguHealth = if (endpoint.protocol.isBmw) MguWifiHealth() else null
+            val acl = mguHealth?.let { health -> watchBmwAcl(device.address, health) }
+            try {
+                onStage(CarPlayReceiverProbe.verify(
+                    address.first, address.second, pin, endpoint.certificate, deviceId, attempt, {
+                        if (volkswagenPeer != null && invitation != null && volkswagenPeer.write(endpoint.certificate)) {
+                        VolkswagenWifiWake.remember(volkswagenPeer, invitation.network)
+                    }
+                        onStreamStarted()
+                    },
+                    onResolution = { resolution, codec ->
+                        diagnostics = diagnostics.copy(resolution = resolution)
+                        onDiagnostics(diagnostics)
+                        onResolution(resolution, codec)
+                    },
+                    readResolutionOnly = readResolutionOnly,
+                    preferences = preferences,
+                    onAudio = { navigation, info ->
+                        diagnostics = if (navigation) diagnostics.copy(navigationAudio = info) else diagnostics.copy(mediaAudio = info)
+                        onDiagnostics(diagnostics)
+                    },
+                    onStage = onStage,
+                    protocol = endpoint.protocol,
+                    mguHealth = mguHealth,
+                    power = power,
+                    fallbackPorts = if (endpoint.protocol.isVehicle && endpoint.port == null) listOf(7000, 7001, 7100, 17000) else emptyList(),
+                    beforeConnect = { host -> invitation?.requireFresh(host) },
+                    beforeHandshake = { host -> invitation?.requireFresh(host, consume = true) },
+                    pairingStore = pairingDirectory?.takeIf { endpoint.protocol.isVehicle }?.let {
+                        VehiclePairingStore(it, deviceId, device.address, endpoint.certificate, endpoint.protocol)
+                    },
+                ))
+                val wifi = endpoint.wifi
+                if (readResolutionOnly && wifi != null && WinPlayHandoff.isWinPlay(endpoint.protocol, endpoint.identity)) {
+                    onWinPlayPreflight(WinPlayHandoff(wifi, address.first, address.second, endpoint.certificate, device.address, deviceId))
+                }
+            } finally {
+                acl?.close()
+            }
+        }
+    }
+
+    @androidx.annotation.RequiresApi(33)
+    @Suppress("DEPRECATION")
+    private fun watchBmwAcl(address: String, health: MguWifiHealth): Closeable? {
+        val app = context ?: return null
+        val receiver = object : android.content.BroadcastReceiver() {
+            @SuppressLint("MissingPermission")
+            override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+                if (intent.action != BluetoothDevice.ACTION_ACL_DISCONNECTED) return
+                val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+                if (!address.equals(device.address, ignoreCase = true) || closed) return
+                if (health.canKeep()) {
+                    ProjectionLog.event("宝马蓝牙 ACL 已断开 · 保留当前 Wi-Fi CarPlay 会话")
+                }
+                // Once RTSP is active, its heartbeat and the network own session teardown.
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(app, receiver,
+            android.content.IntentFilter(BluetoothDevice.ACTION_ACL_DISCONNECTED),
+            androidx.core.content.ContextCompat.RECEIVER_EXPORTED)
+        return Closeable { app.unregisterReceiver(receiver) }
+    }
+
+    private fun restoreVolkswagen(
+        invitation: CarPlayControlInvitation, invited: CarPlayControlInvitation.Invite,
+        certificate: java.security.cert.X509Certificate, store: VehiclePairingStore, fallback: CarPlaySockets,
+        receiverAddress: String, receiverName: String, pin: String, deviceId: String, onStreamStarted: () -> Unit,
+        onResolution: (CarPlayResolution, VideoCodec) -> Unit, onDiagnostics: (ReceiverDiagnostics) -> Unit,
+        preferences: ProjectionPreferences,
+        onStage: (String) -> Unit,
+    ): Boolean {
+        val host = invited.host.hostAddress ?: return false
+        val candidate = CarPlaySockets()
+        var started = false
+        synchronized(this) {
+            if (closed) throw IOException("CarPlay 会话已停止")
+            sockets = candidate
+        }
+        return try {
+            val link = connectivity.getLinkProperties(invitation.network)
+            candidate.useNetwork(invitation.network, link?.interfaceName)
+            val port = CarAirPlayDiscovery.findAdvertised(discovery, invitation.network)
+                ?.takeIf { candidate.resolve(it.first) == invited.host }?.second ?: 7000
+            var diagnostics = ReceiverDiagnostics(
+                receiverName = receiverName, receiverAddress = receiverAddress, phoneAddress = deviceId,
+                host = host, port = port, wifiInterface = link?.interfaceName,
+                phoneIps = link?.linkAddresses?.mapNotNull { it.address.hostAddress }.orEmpty(),
+            )
+            onDiagnostics(diagnostics)
+            onStage("已收到本轮邀请 · 正在验证大众车机身份")
             onStage(CarPlayReceiverProbe.verify(
-                address.first, address.second, pin, endpoint.certificate, deviceId, attempt, onStreamStarted,
+                host, port, pin, certificate, deviceId, candidate,
+                onStreamStarted = { started = true; onStreamStarted() },
                 onResolution = { resolution, codec ->
                     diagnostics = diagnostics.copy(resolution = resolution)
                     onDiagnostics(diagnostics)
                     onResolution(resolution, codec)
                 },
-                readResolutionOnly = readResolutionOnly,
-                preferences = preferences,
                 onAudio = { navigation, info ->
-                    diagnostics = if (navigation) diagnostics.copy(navigationAudio = info) else diagnostics.copy(mediaAudio = info)
+                    diagnostics = if (navigation) diagnostics.copy(navigationAudio = info)
+                        else diagnostics.copy(mediaAudio = info)
                     onDiagnostics(diagnostics)
                 },
+                preferences = preferences,
+                protocol = ReceiverProtocol.VOLKSWAGEN, pairingStore = store, requireSavedPairing = true,
+                fallbackPorts = listOf(7000, 7001, 7100, 17000), power = power,
+                beforeConnect = { invitation.requireFresh(it, expected = invited) },
+                beforeHandshake = { invitation.requireFresh(it, consume = true, expected = invited) },
                 onStage = onStage,
-                protocol = endpoint.protocol,
-                beforeHandshake = { host -> invitation?.requireFresh(host, consume = true) },
-                pairingStore = pairingDirectory?.takeIf { endpoint.protocol.isVehicle }?.let {
-                    VehiclePairingStore(it, deviceId, device.address, endpoint.certificate, endpoint.protocol)
-                },
             ))
-            val wifi = endpoint.wifi
-            if (readResolutionOnly && wifi != null && WinPlayHandoff.isWinPlay(endpoint.protocol, endpoint.identity)) {
-                onWinPlayPreflight(WinPlayHandoff(wifi, address.first, address.second, endpoint.certificate, device.address, deviceId))
-            }
+            true
+        } catch (failure: Exception) {
+            if (started || closed || failure is InterruptedException || failure is java.io.InterruptedIOException &&
+                Thread.currentThread().isInterrupted
+            ) throw failure
+            ProjectionLog.failure("大众 Wi-Fi 恢复失败 · 继续本轮蓝牙认证", failure)
+            false
+        } finally {
+            invitation.discard(invited)
+            candidate.close()
+            synchronized(this) { if (!closed && sockets === candidate) sockets = fallback }
         }
     }
 
+    private fun discoverBmwEndpoint(network: Network, link: LinkProperties, deviceId: String): Pair<String, Int> {
+        if (Build.VERSION.SDK_INT >= 33 && discovery != null) {
+            val local = link.linkAddresses.firstOrNull { it.address is Inet4Address }?.address
+            if (local != null) {
+                val invitation = try {
+                    synchronized(this) {
+                        if (closed) throw IOException("CarPlay 会话已停止")
+                        CarPlayControlInvitation(
+                            connectivity, discovery, network, local, deviceId,
+                            instanceName = "CarNat", sourceVersion = "540.31",
+                        ).also {
+                            controlInvitation = it
+                            it.start()
+                        }
+                    }
+                } catch (failure: IOException) {
+                    if (closed) throw failure
+                    ProjectionLog.failure("宝马控制服务广播不可用", failure)
+                    null
+                }
+                val invited = invitation?.await(expected = null, timeoutMs = 3_000)
+                if (invited != null) {
+                    val host = invited.hostAddress ?: throw IOException("宝马车机地址不可用")
+                    val advertised = CarAirPlayDiscovery.findAdvertised(discovery, network)
+                    return host to (advertised?.takeIf { it.first.substringBefore('%') == host.substringBefore('%') }?.second ?: 7000)
+                }
+            }
+        }
+        return CarAirPlayDiscovery.find(discovery, network, link)
+    }
+
     @Suppress("DEPRECATION")
+    private fun awaitVolkswagenWifi(timeoutMs: Int, onStage: (String) -> Unit): Network {
+        currentVolkswagenWifi()?.let { return it }
+        onStage("等待接入大众车机 Wi-Fi")
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        val signal = java.util.concurrent.Semaphore(0)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
+                if (signal.availablePermits() == 0) signal.release()
+            }
+        }
+        val request = android.net.NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        connectivity.registerNetworkCallback(request, callback)
+        try {
+            while (!closed) {
+                currentVolkswagenWifi()?.let { return it }
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0) break
+                signal.tryAcquire(minOf(remaining, 500), java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw java.io.InterruptedIOException("等待大众车机 Wi-Fi 已取消").apply { initCause(error) }
+        } finally {
+            connectivity.unregisterNetworkCallback(callback)
+        }
+        throw IOException(if (closed) "CarPlay 会话已停止" else "等待大众车机 Wi-Fi 超时")
+    }
+
     private fun currentVolkswagenWifi(): Network? {
         fun isWifi(network: Network) =
-            connectivity.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            connectivity.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                connectivity.getLinkProperties(network)?.linkAddresses?.any { it.address is Inet4Address } == true
         return connectivity.activeNetwork?.takeIf(::isWifi)
             ?: connectivity.allNetworks.filter(::isWifi).singleOrNull()
     }
@@ -465,8 +689,8 @@ internal class BluetoothReceiverProbe(
     @Synchronized
     private fun closeAttempt() {
         sockets?.close()
-        volkswagenInvitation?.close()
-        volkswagenInvitation = null
+        controlInvitation?.close()
+        controlInvitation = null
         runCatching { wifiRequest?.close() }
         wifiRequest = null
         runCatching { peer?.close() }

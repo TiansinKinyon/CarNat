@@ -125,6 +125,10 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val notificationPermissions = remember(context) {
         context.getSharedPreferences("projection_notifications", Context.MODE_PRIVATE)
     }
+    var ssidAccessRequested by remember { mutableStateOf(notificationPermissions.getBoolean("volkswagenSsidRequested", false)) }
+    val volkswagenNeedsSsidAccess = volkswagen && mode == ConnectionMode.CAR_WITH &&
+        context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+        !ssidAccessRequested
     val projectionPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (Manifest.permission.POST_NOTIFICATIONS in grants) {
             notificationPermissions.edit().putBoolean("requested", true).apply()
@@ -137,7 +141,7 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         modifier = modifier,
         status = status,
         manual = mode == ConnectionMode.MANUAL,
-        autoNeedsPermissions = autoNeedsPermissions,
+        autoNeedsPermissions = autoNeedsPermissions || volkswagenNeedsSsidAccess,
         settings = settings,
         phoneAddress = phoneAddress,
         onAddressChange = { input ->
@@ -198,6 +202,12 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
                 CarlifeConnectService.stopDiagnostic(context)
             } else {
                 val missing = missingReceiverPermissions(context).toMutableList()
+                if (volkswagenNeedsSsidAccess) {
+                    ssidAccessRequested = true
+                    notificationPermissions.edit().putBoolean("volkswagenSsidRequested", true).apply()
+                    missing.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                    missing.add(Manifest.permission.ACCESS_FINE_LOCATION)
+                }
                 if (Build.VERSION.SDK_INT >= 33 &&
                     context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
                     !notificationPermissions.getBoolean("requested", false)

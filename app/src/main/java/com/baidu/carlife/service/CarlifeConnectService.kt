@@ -44,6 +44,7 @@ import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AvcPayload
 import com.baidu.carlife.xiaomi.carplay.HevcPayload
 import com.baidu.carlife.xiaomi.carplay.WinPlayHandoff
+import com.baidu.carlife.xiaomi.carplay.Iap2PowerStatus
 import com.baidu.carlife.xiaomi.carplay.VideoCodec
 import com.baidu.carlife.xiaomi.carplay.VideoPreference
 import com.baidu.carlife.xiaomi.carplay.CarPlayMediaAudio
@@ -88,6 +89,7 @@ class CarlifeConnectService : Service() {
         expectedResolution: CarPlayResolution? = null,
         fromCarWith: Boolean = false,
         handoff: WinPlayHandoff? = null,
+        vehicleNetwork: android.net.Network? = null,
     ) {
         val readResolutionOnly = expectedResolution == null && !fromCarWith
         val preferences = ProjectionPreferences.load(this)
@@ -108,6 +110,9 @@ class CarlifeConnectService : Service() {
             getSystemService(android.net.nsd.NsdManager::class.java),
             pairingDirectory = noBackupFilesDir,
             hasConfiguredPhoneAddress = ReceiverSettings.validAddress(settings.address),
+            context = applicationContext,
+            volkswagenWakeNetwork = vehicleNetwork,
+            power = { Iap2PowerStatus.read(applicationContext) },
         )
         receiverProbe = probe
         val timeout = projectionScope.launch {
@@ -151,7 +156,7 @@ class CarlifeConnectService : Service() {
                         receiverAddress = if (fromCarWith && headUnit != HeadUnitProfile.VOLKSWAGEN) "" else settings.receiverAddress,
                         readResolutionOnly = readResolutionOnly,
                         preferences = preferences,
-                        retryAfterDisconnect = !fromCarWith,
+                        retryAfterDisconnect = !fromCarWith || headUnit.protocol.isVehicle,
                         handoff = handoff,
                         onWinPlayPreflight = { winPlayPreflight = it },
                         onResolution = { resolution, codec ->
@@ -300,6 +305,24 @@ class CarlifeConnectService : Service() {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                     }
                 }
+            }
+            return START_NOT_STICKY
+        }
+        if (intent?.action == volkswagenWakeToken) {
+            @Suppress("DEPRECATION")
+            val network = intent.getParcelableExtra<android.net.Network>("vehicleNetwork")
+            if (!stopping && !mutableState.value.active && network != null &&
+                network == com.baidu.carlife.xiaomi.carplay.VolkswagenWifiWake.matchingNetwork(this)
+            ) {
+                clearLaunchTicket(this)
+                mutableState.value = CaptureStatus(phase = CapturePhase.WAITING_FOR_RECEIVER)
+                startProjectionForeground()
+                val capture = CaptureSession(videoBitrateKbps = ProjectionPreferences.load(this).videoBitrateKbps)
+                worker.post { session = capture }
+                startReceiver(capture, fromCarWith = true, vehicleNetwork = network)
+            } else if (!mutableState.value.active) {
+                startProjectionForeground()
+                stopSelfResult(startId)
             }
             return START_NOT_STICKY
         }
@@ -1176,6 +1199,13 @@ class CarlifeConnectService : Service() {
             "com.miui.carlink",
             "com.xiaomi.ucar.carlife.CarlifeConnService",
         )
+        private val volkswagenWakeToken = UUID.randomUUID().toString()
+        internal fun wakeVolkswagen(context: Context, network: android.net.Network): Boolean = runCatching {
+            androidx.core.content.ContextCompat.startForegroundService(context,
+                Intent(context, CarlifeConnectService::class.java)
+                    .setAction(volkswagenWakeToken).putExtra("vehicleNetwork", network))
+        }.onFailure { ProjectionLog.failure("大众热点唤起等待系统允许启动服务", it) }.isSuccess
+
         private val diagnosticToken = UUID.randomUUID().toString()
         private val launchFailedToken = UUID.randomUUID().toString()
         private val stopToken = UUID.randomUUID().toString()
@@ -1265,23 +1295,27 @@ class CarlifeConnectService : Service() {
         }
 
         private fun consumeLaunchTicket(context: Context): CarWithLaunch? {
-            val ticket = context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE)
-            val elapsedAge = SystemClock.elapsedRealtime() - ticket.getLong("elapsed", -CAR_WITH_START_TIMEOUT_MS)
-            val wallAge = System.currentTimeMillis() - ticket.getLong("wall", 0)
-            if (elapsedAge !in 0 until CAR_WITH_START_TIMEOUT_MS ||
-                wallAge !in 0 until CAR_WITH_START_TIMEOUT_MS ||
-                ticket.getString("receiver", null) != ReceiverSettings.load(context).receiverAddress
+            val ticket = context.getSharedPreferences(LAUNCH_TICKET, MODE_PRIVATE).all
+            fun fresh(key: String, now: Long): Boolean {
+                val issued = ticket[key] as? Long ?: return false
+                return issued in 0..now && now - issued < CAR_WITH_START_TIMEOUT_MS
+            }
+            if (!fresh("elapsed", SystemClock.elapsedRealtime()) ||
+                !fresh("wall", System.currentTimeMillis()) ||
+                ticket["receiver"] != ReceiverSettings.load(context).receiverAddress
             ) {
                 clearLaunchTicket(context)
                 return null
             }
-            val width = ticket.getInt("width", 0)
-            val height = ticket.getInt("height", 0)
-            val maxFps = ticket.getInt("max_fps", 0).takeIf { it > 0 }
-            val winPlay = ticket.getString("winplay", null)
+            val width = ticket["width"] as? Int ?: 0
+            val height = ticket["height"] as? Int ?: 0
+            val maxFps = (ticket["max_fps"] as? Int)?.takeIf { it in ProjectionPreferences.frameRates }
+            val winPlay = (ticket["winplay"] as? String)
                 ?.takeIf { HeadUnitProfile.load(context) == HeadUnitProfile.GENERIC }
                 ?.let { WinPlayHandoff.read(context, it) }
-            if (!clearLaunchTicket(context) || width <= 0 || height <= 0) return null
+            if (!clearLaunchTicket(context) || width !in 1..ProjectionPreferences.dimensions.last ||
+                height !in 1..ProjectionPreferences.dimensions.last
+            ) return null
             return CarWithLaunch(CarPlayResolution(width, height, maxFps), winPlay)
         }
 
