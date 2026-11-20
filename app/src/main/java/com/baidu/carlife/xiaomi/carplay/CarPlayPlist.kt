@@ -6,9 +6,14 @@ import java.net.ProtocolException
 
 internal object CarPlayPlist {
     fun readDictionary(bytes: ByteArray): NSDictionary {
-        if (bytes.size !in 40..MAX_BYTES) invalid()
+        if (bytes.size !in 40..MAX_BYTES || !HEADER.indices.all { bytes[it] == HEADER[it] }) invalid()
         Budget(bytes).check()
-        return BinaryPropertyListParser.parse(bytes) as? NSDictionary ?: invalid()
+        val value = try {
+            BinaryPropertyListParser.parse(bytes)
+        } catch (failure: Exception) {
+            throw ProtocolException("Invalid CarPlay binary plist").apply { initCause(failure) }
+        }
+        return value as? NSDictionary ?: invalid()
     }
 
     // The parser creates a new object for each reference, including repeated references.
@@ -38,7 +43,7 @@ internal object CarPlayPlist {
             if (dictionaryKey && type !in 5..7) invalid()
             remaining -= 128
             when (type) {
-                0 -> Unit
+                0 -> if (inlineLength !in setOf(0, 8, 9)) invalid()
                 1, 2, 3, 8 -> {
                     val size = when (type) {
                         1 -> {
@@ -49,10 +54,21 @@ internal object CarPlayPlist {
                             if (inlineLength !in 2..3) invalid()
                             1 shl inlineLength
                         }
-                        3 -> 8
+                        3 -> {
+                            if (inlineLength != 3) invalid()
+                            8
+                        }
                         else -> inlineLength + 1
                     }
                     if (size > table - offset - 1) invalid()
+                    if (type == 1 && size == 16) {
+                        // dd-plist keeps the low 64 bits. Only accept values that fit those bits.
+                        val start = offset + 1
+                        val zeroExtended = (start until start + 8).all { bytes[it] == 0.toByte() }
+                        val signExtended = bytes[start + 8] < 0 &&
+                            (start until start + 8).all { bytes[it] == (-1).toByte() }
+                        if (!zeroExtended && !signExtended) invalid()
+                    }
                 }
                 4, 5, 6, 7, 10, 13 -> {
                     var start = offset + 1
@@ -102,6 +118,7 @@ internal object CarPlayPlist {
 
     private fun invalid(): Nothing = throw ProtocolException("Binary plist exceeds CarPlay format or resource limits")
 
+    private val HEADER = "bplist00".toByteArray(Charsets.US_ASCII)
     private const val MAX_BYTES = 4 * 1024 * 1024
     private const val MAX_OBJECTS = 16_384
 }

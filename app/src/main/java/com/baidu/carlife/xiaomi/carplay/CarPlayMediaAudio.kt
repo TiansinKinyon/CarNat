@@ -6,6 +6,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.util.Log
 import java.io.Closeable
+import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -105,7 +106,9 @@ internal class CarPlayMediaAudio(
     private fun encode(encoder: MediaCodec) {
         val index = encoder.dequeueInputBuffer(20_000)
         if (index >= 0) {
-            checkNotNull(encoder.getInputBuffer(index)).put(payload.array())
+            val input = encoder.getInputBuffer(index) ?: throw IOException("音频编码器未提供输入缓冲")
+            if (input.remaining() < payload.capacity()) throw IOException("音频编码器输入缓冲太小")
+            input.put(payload.array())
             encoder.queueInputBuffer(index, 0, payload.capacity(), inputSamples * 1_000_000 / rate, 0)
             inputSamples += 1024
         } else {
@@ -117,9 +120,13 @@ internal class CarPlayMediaAudio(
             if (output < 0) return
             try {
                 if (outputInfo.size > 0 && outputInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
-                    val buffer = checkNotNull(encoder.getOutputBuffer(output))
-                    buffer.position(outputInfo.offset)
+                    val buffer = encoder.getOutputBuffer(output)
+                        ?: throw IOException("音频编码器未提供输出缓冲")
+                    if (outputInfo.size > MAX_AUDIO_PAYLOAD || outputInfo.offset < 0 ||
+                        outputInfo.offset > buffer.capacity() - outputInfo.size
+                    ) throw IOException("音频编码器输出超出范围")
                     buffer.limit(outputInfo.offset + outputInfo.size)
+                    buffer.position(outputInfo.offset)
                     sendPacket(ByteArray(outputInfo.size).also { buffer.get(it) })
                 }
             } finally {
@@ -137,6 +144,7 @@ internal class CarPlayMediaAudio(
     }
 
     private fun sendPacket(audio: ByteArray) {
+        if (sequence == Long.MAX_VALUE) throw IOException("音频会话需要重新协商密钥")
         val type = if (aac) AAC_TYPE else PCM_TYPE
         val header = ByteBuffer.allocate(12).put(0x80.toByte())
             .put((if (sequence == 0L) 0x80 or type else type).toByte())
@@ -186,6 +194,7 @@ internal class CarPlayMediaAudio(
         const val PCM_TYPE = 100
         const val AAC_TYPE = 102
         private const val TAG = "CarNatAudio"
+        private const val MAX_AUDIO_PAYLOAD = 60_000
         private val active = java.util.concurrent.ConcurrentHashMap<Int, CarPlayMediaAudio>()
 
         fun offer(data: ByteArray?, sourceStream: Int, rate: Int, channels: Int, format: Int) {

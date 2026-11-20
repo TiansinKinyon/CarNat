@@ -23,24 +23,27 @@ internal class CarPlayVideoWriter(
     private val cipher = Cipher.getInstance("ChaCha20-Poly1305")
     private var counter = 0L
     private var configured = false
+    private var codec = VideoCodec.H264
     private var failed = false
 
     /** Sends the encoder's AVCDecoderConfigurationRecord (avcC). */
-    fun writeConfiguration(avcC: ByteArray, width: Int, height: Int) {
+    fun writeConfiguration(avcC: ByteArray, width: Int, height: Int, codec: VideoCodec = VideoCodec.H264) {
         check(!failed) { "The video stream must be reopened after a write failure" }
         require(avcC.isNotEmpty() && width > 0 && height > 0)
-        val configuration = ByteBuffer.allocate(8 + avcC.size)
+        val configuration = if (codec == VideoCodec.HEVC) avcC else ByteBuffer.allocate(8 + avcC.size)
             .putInt(8 + avcC.size)
             .putInt(AVCC_BOX)
             .put(avcC)
             .array()
         val header = header(configuration.size, CONFIGURATION, 0).apply {
-            put(6, 4)
+            put(6, if (codec == VideoCodec.HEVC) 0x1e.toByte() else 4.toByte())
+            if (codec == VideoCodec.HEVC) put(7, 1)
             putFloat(16, width.toFloat())
             putFloat(20, height.toFloat())
         }
         writePacket(header.array(), configuration)
         configured = true
+        this.codec = codec
     }
 
     /** Sends one AVC access unit with four-byte big-endian NAL lengths. */
@@ -49,7 +52,9 @@ internal class CarPlayVideoWriter(
         require(avccAccessUnit.isNotEmpty())
         check(counter != Long.MAX_VALUE) { "The video stream must renegotiate its key" }
 
-        val header = header(avccAccessUnit.size + TAG_BYTES, VIDEO, ntpTimestamp).array()
+        val header = header(avccAccessUnit.size + TAG_BYTES, VIDEO, ntpTimestamp).apply {
+            if (codec == VideoCodec.HEVC) put(5, 0x10)
+        }.array()
         val nonce = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
             .putLong(4, counter++)
             .array()

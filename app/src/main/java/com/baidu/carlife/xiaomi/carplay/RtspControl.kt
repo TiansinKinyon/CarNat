@@ -25,6 +25,28 @@ internal class RtspControl(
     private var nextSequence = 1
     private var closed = false
     private var encrypted = false
+    private var deferredSequence: Int? = null
+
+    @Volatile var onPeerCommand: ((ByteArray) -> Boolean)? = null
+
+    /** Queue a single command without holding the request/response lock while the peer changes transports. */
+    @Synchronized
+    fun sendDeferredCommand(body: ByteArray) {
+        if (closed || !encrypted || deferredSequence != null) throw IOException("CarPlay 交接命令不可发送")
+        require(body.size <= MAX_PEER_COMMAND_BYTES)
+        val sequence = nextSequence++
+        val head = "POST /command RTSP/1.0\r\nCSeq: $sequence\r\n" +
+            "Content-Type: application/x-apple-binary-plist\r\nContent-Length: ${body.size}\r\n\r\n"
+        try {
+            output.write(head.toByteArray(Charsets.US_ASCII))
+            output.write(body)
+            output.flush()
+            deferredSequence = sequence
+        } catch (failure: IOException) {
+            runCatching { close() }
+            throw failure
+        }
+    }
 
     /** Switches the existing connection after pair verification has succeeded. */
     @Synchronized
@@ -91,13 +113,46 @@ internal class RtspControl(
     }
 
     private fun readResponse(sequence: Int): RtspResponse {
-        val statusLine = readLine()
-        val parts = statusLine.split(' ', limit = 3)
-        val status = parts.getOrNull(1)?.takeIf { it.length == 3 }?.toIntOrNull()
-        if (parts.firstOrNull() != "RTSP/1.0" || status == null || status !in 100..599) {
-            throw ProtocolException("Invalid RTSP response status")
+        repeat(32) {
+            val line = readLine()
+            val parts = line.split(' ', limit = 3)
+            val status = parts.getOrNull(1)?.takeIf { it.length == 3 }?.toIntOrNull()
+            if (parts.firstOrNull() == "RTSP/1.0" && status != null && status in 100..599) {
+                val headers = readHeaders(line)
+                val responseSequence = headers["cseq"]?.toIntOrNull()
+                    ?: throw ProtocolException("RTSP response has no valid CSeq")
+                val body = readBody(headers, MAX_BODY_BYTES)
+                if (responseSequence == sequence) return RtspResponse(status, parts.getOrElse(2) { "" }, headers, body)
+                if (responseSequence == deferredSequence) {
+                    deferredSequence = null
+                    ProjectionLog.event("宝马蓝牙交接请求应答 · RTSP $status")
+                } else throw ProtocolException("RTSP response CSeq does not match the request")
+            } else {
+                val handler = onPeerCommand ?: throw ProtocolException("Invalid RTSP response status")
+                val dialect = parts.getOrNull(2)
+                if (!encrypted || parts.firstOrNull() != "POST" || parts.getOrNull(1) != "/command" ||
+                    dialect !in setOf("RTSP/1.0", "HTTP/1.0", "HTTP/1.1")
+                ) throw ProtocolException("Unsupported peer command on CarPlay control channel")
+                val headers = readHeaders(line)
+                val peerSequence = headers["cseq"]?.toIntOrNull()
+                if ((headers.containsKey("cseq") || dialect == "RTSP/1.0") && peerSequence == null) {
+                    throw ProtocolException("Invalid peer command CSeq")
+                }
+                val accepted = handler(readBody(headers, MAX_PEER_COMMAND_BYTES))
+                val reply = buildString {
+                    append(dialect)
+                    append(if (accepted) " 200 OK\r\n" else " 400 Bad Request\r\n")
+                    if (peerSequence != null) append("CSeq: $peerSequence\r\n")
+                    append("Content-Length: 0\r\n\r\n")
+                }
+                output.write(reply.toByteArray(Charsets.US_ASCII))
+                output.flush()
+            }
         }
+        throw ProtocolException("Too many peer commands while waiting for an RTSP response")
+    }
 
+    private fun readHeaders(statusLine: String): Map<String, String> {
         var headBytes = statusLine.length + 2
         val headers = linkedMapOf<String, String>()
         while (true) {
@@ -116,21 +171,22 @@ internal class RtspControl(
             }
         }
 
-        if (headers["cseq"]?.toIntOrNull() != sequence) {
-            throw ProtocolException("RTSP response CSeq does not match the request")
-        }
+        return headers
+    }
+
+    private fun readBody(headers: Map<String, String>, limit: Int): ByteArray {
         val bodyLength = headers["content-length"]?.let {
-            it.toIntOrNull()?.takeIf { length -> length in 0..MAX_BODY_BYTES }
+            it.toIntOrNull()?.takeIf { length -> length in 0..limit }
                 ?: throw ProtocolException("Invalid RTSP content length")
         } ?: 0
         val body = ByteArray(bodyLength)
         var offset = 0
         while (offset < body.size) {
             val received = input.read(body, offset, body.size - offset)
-            if (received < 0) throw EOFException("Truncated RTSP response body")
+            if (received <= 0) throw EOFException("Truncated RTSP message body")
             offset += received
         }
-        return RtspResponse(status, parts.getOrElse(2) { "" }, headers, body)
+        return body
     }
 
     private fun readLine(): String {
@@ -161,6 +217,7 @@ internal class RtspControl(
         val OWNED_HEADERS = setOf("cseq", "content-length")
         const val MAX_LINE_BYTES = 8192
         const val MAX_HEAD_BYTES = 32768
+        const val MAX_PEER_COMMAND_BYTES = 65_536
         const val MAX_BODY_BYTES = 4 * 1024 * 1024
     }
 }

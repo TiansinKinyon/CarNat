@@ -61,8 +61,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.baidu.carlife.service.CarlifeConnectService
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.AudioPreference
+import com.baidu.carlife.xiaomi.carplay.VideoPreference
 import com.baidu.carlife.xiaomi.carplay.CarPlayMicrophone
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
+import com.baidu.carlife.xiaomi.carplay.HeadUnitProfile
 import com.baidu.carlife.xiaomi.carplay.ProjectionPreferences
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.ui.MicrophoneLevelMeter
@@ -78,7 +80,7 @@ internal enum class SettingEntry(val route: String, val title: String) {
 }
 
 private enum class Editor(val title: String) {
-    RESOLUTION("输出分辨率"), FPS("输出帧率上限"), BITRATE("视频目标码率"),
+    RESOLUTION("输出分辨率"), FPS("输出帧率上限"), BITRATE("视频目标码率"), VIDEO_CODEC("视频编码"),
     AUDIO_FORMAT("音频格式"), AUDIO_BUFFER("音频缓冲"), PIN("网络配对码"),
 }
 
@@ -92,6 +94,9 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
     val editable = active && !capture.active
     var connectionMode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
     var showConnectionMode by remember { mutableStateOf(false) }
+    val headUnitProfile by remember(context) { HeadUnitProfile.observe(context) }
+        .collectAsStateWithLifecycle(initialValue = HeadUnitProfile.load(context))
+    var showHeadUnitProfile by remember { mutableStateOf(false) }
     var showMicrophone by remember { mutableStateOf(false) }
 
     fun save(updated: ProjectionPreferences) {
@@ -108,7 +113,10 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             SettingsRow("连接方式", connectionMode.label, active, capture.active, leadingIcon = {
                 Icon(painterResource(R.drawable.ic_connect), contentDescription = null)
             }) { showConnectionMode = true }
-
+            SettingsDivider()
+            SettingsRow("车机品牌", headUnitProfile.label, active, capture.active, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_car_gear), contentDescription = null)
+            }) { showHeadUnitProfile = true }
         }
         SettingsCard {
             SettingsRow(Editor.RESOLUTION.title, preferences.width?.let { "$it × ${preferences.height}" } ?: "跟随车机", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_aspect_ratio), contentDescription = null) }) {
@@ -122,6 +130,10 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             SettingsRow(Editor.BITRATE.title, "${preferences.videoBitrateKbps} Kbps", active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_mist), contentDescription = null) }) {
                 editor = Editor.BITRATE
             }
+            SettingsDivider()
+            SettingsRow(Editor.VIDEO_CODEC.title, preferences.videoPreference.label, active, capture.active, leadingIcon = {
+                Icon(painterResource(R.drawable.ic_video_file), contentDescription = null)
+            }) { editor = Editor.VIDEO_CODEC }
             SettingsDivider()
             SettingsRow(Editor.AUDIO_FORMAT.title, preferences.audioPreference.label, active, capture.active, leadingIcon = { Icon(painterResource(R.drawable.ic_audio_file), contentDescription = null) }) {
                 editor = Editor.AUDIO_FORMAT
@@ -167,6 +179,32 @@ internal fun SettingsScreen(active: Boolean = true, onOpen: (SettingEntry) -> Un
             connectionMode = mode
             showConnectionMode = false
         }
+    }
+    if (showHeadUnitProfile && editable) {
+        AlertDialog(
+            onDismissRequest = { showHeadUnitProfile = false },
+            title = { Text("车机品牌") },
+            text = {
+                Column(Modifier.selectableGroup()) {
+                    HeadUnitProfile.entries.forEach { profile ->
+                        val selected = profile == headUnitProfile
+                        ListItem(
+                            headlineContent = { Text(profile.label) },
+                            supportingContent = { Text(profile.summary) },
+                            leadingContent = { RadioButton(selected = selected, onClick = null) },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.selectable(selected, role = Role.RadioButton) {
+                                profile.save(context)
+                                showHeadUnitProfile = false
+                            },
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showHeadUnitProfile = false }) { Text("关闭") }
+            },
+        )
     }
     if (showMicrophone && active) {
         MicrophoneDialog(
@@ -426,6 +464,28 @@ private fun ProjectionEditor(
                     },
                 )
                 NumberField("自定义（1000–20000 Kbps）", value) { value = it }
+            }
+        }
+        Editor.VIDEO_CODEC -> {
+            var format by remember { mutableStateOf(current.videoPreference) }
+            EditorDialog(editor.title, true, onDismiss,
+                { onSave(current.copy(videoPreference = format)) },
+                { onSave(current.copy(videoPreference = VideoPreference.AUTO)) }) {
+                Text("自动和 HEVC 优先会在手机与车机均支持时使用 HEVC，否则使用 H.264。")
+                Column(Modifier.selectableGroup()) {
+                    VideoPreference.entries.forEach { entry ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .selectable(selected = format == entry, role = Role.RadioButton) { format = entry }
+                                .padding(vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = format == entry, onClick = null)
+                            Text(entry.label)
+                        }
+                    }
+                }
             }
         }
         Editor.AUDIO_FORMAT -> {

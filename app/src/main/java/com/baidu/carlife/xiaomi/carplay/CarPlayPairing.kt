@@ -3,16 +3,26 @@ package com.baidu.carlife.xiaomi.carplay
 import java.net.ProtocolException
 import java.security.MessageDigest
 import java.util.UUID
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 
-internal class CarPlayPairing(private val control: RtspControl) {
-    private val identity = UUID.randomUUID().toString().toByteArray()
-    private val signingKey = PairingCrypto.signingKey()
+internal class CarPlayPairing(
+    private val control: RtspControl,
+    saved: PairingCredentials? = null,
+    private val protocol: ReceiverProtocol = ReceiverProtocol.GENERIC,
+) {
+    private val identity = saved?.controllerId ?: UUID.randomUUID().toString().toByteArray(Charsets.US_ASCII)
+    private val signingKey = saved?.let { Ed25519PrivateKeyParameters(it.controllerKey, 0) } ?: PairingCrypto.signingKey()
+    private var receiver = saved?.let { ReceiverIdentity(it.receiverId, it.receiverKey) }
+
+    fun credentials(): PairingCredentials? = receiver?.let {
+        PairingCredentials(identity, signingKey.encoded, it.identifier, it.key)
+    }
 
     /** Establishes a receiver identity with its user-provided PIN, then authenticates the live connection. */
     fun pair(pin: String): CarPlaySessionKeys {
         require(pin.length in 4..16 && pin.all { it.isDigit() || it == '-' }) { "Enter the receiver's pairing PIN" }
-        val receiver = setup(pin)
-        return verify(receiver)
+        val authenticatedReceiver = receiver ?: setup(pin)
+        return verify(authenticatedReceiver).also { receiver = authenticatedReceiver }
     }
 
     private fun setup(pin: String): ReceiverIdentity {
@@ -90,16 +100,22 @@ internal class CarPlayPairing(private val control: RtspControl) {
 
     private fun exchange(path: String, state: Int, vararg fields: Pair<Int, ByteArray>): Map<Int, ByteArray> {
         val protocolHeader = if (path == "/pair-setup") "X-Apple-HKP" to "2" else "X-Apple-PD" to "1"
+        val headers = mapOf(protocolHeader, "Content-Type" to "application/pairing+tlv8")
         val response = control.request(
-            "POST", path, mapOf(protocolHeader, "Content-Type" to "application/pairing+tlv8"),
+            "POST", path, if (protocol.isVehicle) headers + mapOf("X-Apple-HKP" to "2", "X-Apple-PD" to "1") else headers,
             PairingTlv.encode(PairingTlv.STATE to byteArrayOf((state - 1).toByte()), *fields),
         )
+        if (protocol.isBmw && path == "/pair-verify" && response.status == 404) {
+            throw ReceiverPairingMissing()
+        }
         if (response.status !in 200..299) throw ProtocolException("$path rejected by receiver (RTSP ${response.status})")
         return PairingTlv.response(response.body, state)
     }
 
     private class ReceiverIdentity(val identifier: ByteArray, val key: ByteArray)
 }
+
+internal class ReceiverPairingMissing : ProtocolException("车机已无网络配对记录")
 
 internal class CarPlaySessionKeys(private val sharedSecret: ByteArray) {
     fun eventRead() = PairingCrypto.derive(sharedSecret, "Events-Salt", "Events-Write-Encryption-Key")

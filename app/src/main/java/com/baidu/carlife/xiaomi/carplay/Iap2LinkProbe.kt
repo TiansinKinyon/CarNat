@@ -6,27 +6,55 @@ import java.io.DataInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ProtocolException
+import java.nio.ByteBuffer
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.util.UUID
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 
 internal object Iap2LinkProbe {
+    private val identificationGroups = setOf(0x0a, 0x0b, 0x0c, 0x12)
     private val detection = byteArrayOf(-1, 0x55, 2, 0, -18, 16)
 
-    class Endpoint(val host: String, val port: Int, val certificate: X509Certificate, val wifi: ReceiverWifi?)
+    class Endpoint(
+        val host: String?, val port: Int?, val certificate: X509Certificate, val wifi: ReceiverWifi?,
+        val protocol: ReceiverProtocol,
+        val identity: String? = null,
+    )
 
     fun run(
-        input: InputStream, output: OutputStream, onWifi: (ReceiverWifi) -> Unit = {}, onStage: (String) -> Unit,
-    ): Endpoint = exchange(input, output, null, onWifi, onStage)
+        input: InputStream, output: OutputStream, onWifi: (ReceiverWifi) -> Unit = {},
+        profile: HeadUnitProfile = HeadUnitProfile.GENERIC, deviceId: String = "",
+        onBmwAppsWindow: (Boolean) -> Unit = {},
+        initiateLink: Boolean = false,
+        power: () -> Iap2PowerStatus = { Iap2PowerStatus() },
+        onBmwEndpoint: ((Endpoint) -> Unit)? = null,
+        onStage: (String) -> Unit,
+    ): Endpoint = exchange(input, output, null, onWifi, onStage, profile, deviceId, onBmwAppsWindow, initiateLink, power, onBmwEndpoint = onBmwEndpoint)
 
-    fun runNetwork(input: InputStream, output: OutputStream, certificate: X509Certificate, onStage: (String) -> Unit) {
-        exchange(input, output, certificate, {}, onStage)
+    fun runNetwork(
+        input: InputStream, output: OutputStream, certificate: X509Certificate,
+        protocol: ReceiverProtocol, power: () -> Iap2PowerStatus, onStage: (String) -> Unit,
+        onAuthenticated: () -> Unit,
+    ) {
+        val profile = HeadUnitProfile.entries.first { it.protocol == protocol }
+        exchange(input, output, certificate, {}, onStage, profile, power = power, onNetworkAuthenticated = onAuthenticated)
     }
 
     private fun exchange(
         input: InputStream, output: OutputStream, expectedCertificate: X509Certificate?,
         onWifi: (ReceiverWifi) -> Unit,
         onStage: (String) -> Unit,
+        profile: HeadUnitProfile = HeadUnitProfile.GENERIC,
+        deviceId: String = "",
+        onBmwAppsWindow: (Boolean) -> Unit = {},
+        initiateLink: Boolean = false,
+        power: () -> Iap2PowerStatus = { Iap2PowerStatus() },
+        onNetworkAuthenticated: () -> Unit = {},
+        onBmwEndpoint: ((Endpoint) -> Unit)? = null,
     ): Endpoint {
         val incoming = DataInputStream(input)
         var repliedToDetection = false
@@ -37,32 +65,136 @@ internal object Iap2LinkProbe {
         var lastSyncRequest: ByteArray? = null
         var lastSyncReply: ByteArray? = null
         var controlSession = 0
+        var networkCertificateFirst = false
+        var waitingForNetworkIdentity = false
         val controlData = ByteArrayOutputStream()
         var awaitingCertificate = false
         var challenge: ByteArray? = null
         var leaf: X509Certificate? = null
         var authenticated = false
         var requestWifi = false
+        var protocol = profile.protocol
+        var declaresAvailability = false
+        var declaresWifiConfiguration = false
+        var declaresStartSession = false
+        var hasSendList = false
+        var legacyMguWifi = false
+        var bmwAppsOnly = false
+        var requestedFullCertificate = false
+        var separatePowerUpdates = false
+        var pendingPowerRequest: ByteArray? = null
+        var endpointDelivered = false
+        val eaProtocolIds = linkedSetOf<Int>()
+        var model = ""
+        var identityText: String? = null
         var wifi: ReceiverWifi? = null
 
-        fun sendControl(id: Int, value: ByteArray? = null, parameterId: Int = 0) {
+        fun sendControlBody(id: Int, body: ByteArray) {
             localSequence = (localSequence + 1) and 255
-            val size = if (value == null) 6 else 10 + value.size
+            val size = 6 + body.size
             val header = byteArrayOf(0x40, 0x40, (size ushr 8).toByte(), size.toByte(),
                 (id ushr 8).toByte(), id.toByte())
-            val request = if (value == null) header else {
-                val parameterLength = 4 + value.size
-                header + byteArrayOf((parameterLength ushr 8).toByte(), parameterLength.toByte(),
-                    (parameterId ushr 8).toByte(), parameterId.toByte()) + value
-            }
-            output.write(frame(0x40, localSequence, peerSequence, request, controlSession))
+            output.write(frame(0x40, localSequence, peerSequence, header + body, controlSession))
             output.flush()
+        }
+
+        fun sendControl(id: Int, value: ByteArray? = null, parameterId: Int = 0) {
+            sendControlBody(id, value?.let { parameter(parameterId, it) } ?: byteArrayOf())
+        }
+
+        fun sendAvailability() {
+            val available = parameter(0, byteArrayOf(1))
+            val identity = if (protocol.isVehicle) parameter(1, cString(deviceId)) else byteArrayOf()
+            sendControl(0x4300, available + identity, parameterId = 1)
+        }
+
+        fun sendBmwGreetings() {
+            val time = Date()
+            val zone = TimeZone.getDefault()
+            val uuid = UUID.nameUUIDFromBytes("CarNat:iAP2:$deviceId".toByteArray(Charsets.US_ASCII))
+            sendControl(0x4e0c, cString(uuid.toString().uppercase(Locale.ROOT)))
+            sendControl(0x4e0d, byteArrayOf(1))
+            sendControl(0x4e0a, cString(Locale.getDefault().language.ifBlank { "en" }))
+            sendControl(0x4e09, cString("CarNat"))
+            val date = parameter(0, ByteBuffer.allocate(8).putLong(time.time / 1000).array())
+            val offset = parameter(1, ByteBuffer.allocate(2).putShort((zone.getOffset(time.time) / 60_000).toShort()).array())
+            val daylight = parameter(2, byteArrayOf(if (zone.inDaylightTime(time)) 1 else 0))
+            sendControlBody(0x4e0b, date + offset + daylight)
+        }
+
+        fun readCapabilities(identity: Map<Int, ByteArray>) {
+            requestWifi = containsMessage(identity[7], 0x5702)
+            declaresAvailability = containsMessage(identity[7], 0x4300)
+            declaresWifiConfiguration = containsMessage(identity[6], 0x5703)
+            declaresStartSession = containsMessage(identity[6], 0x4301)
+            hasSendList = identity[6] != null
+            legacyMguWifi = model.equals("MGU-55-BMW", ignoreCase = true) &&
+                requestWifi && declaresWifiConfiguration && !declaresAvailability
+            bmwAppsOnly = protocol == ReceiverProtocol.BMW_MGU &&
+                model.startsWith("MGU-", ignoreCase = true) &&
+                !requestWifi && !declaresAvailability && !declaresWifiConfiguration && !declaresStartSession &&
+                (0x0a..0x0c).any { id ->
+                    identity[id]?.toString(Charsets.UTF_8)?.contains("de.bmw.a4a.") == true
+                } && (0x0a..0x0c).none { id ->
+                    identity[id]?.toString(Charsets.UTF_8)?.contains("com.bmw.carplay") == true
+                }
+        }
+
+        fun startMguWifi() {
+            val legacyExchange = requestWifi || declaresWifiConfiguration || !declaresStartSession
+            if (legacyExchange) sendControl(0x5702) else sendAvailability()
+        }
+
+        fun openBmwAccessorySessions() {
+            if (legacyMguWifi || bmwAppsOnly) return
+            eaProtocolIds.forEachIndexed { index, id ->
+                val body = parameter(0, byteArrayOf(id.toByte())) +
+                    parameter(1, ByteBuffer.allocate(2).putShort((index + 1).toShort()).array())
+                sendControlBody(0xea00, body)
+            }
+        }
+
+        fun replyPower(message: ByteArray) {
+            val fields = try { parameters(message) } catch (_: ProtocolException) { return }
+            if (fields.values.any { it.isNotEmpty() }) return
+            val values = power().parameters(fields.keys).map { (id, bytes) -> parameter(id, bytes) }
+            if (separatePowerUpdates) values.forEach { sendControlBody(0xae01, it) }
+            else sendControlBody(0xae01, values.fold(byteArrayOf()) { body, field -> body + field })
+        }
+
+        fun publishToBluetoothOwner(endpoint: Endpoint): Boolean {
+            if (!protocol.isBmw || onBmwEndpoint == null) return false
+            endpointDelivered = true
+            onBmwEndpoint(endpoint)
+            return true
         }
 
         fun sendIdentification() {
             sendControl(0x1d00)
             identificationSent = true
             onStage("已请求 iAP2 接收端身份")
+        }
+        fun startControl() {
+            if (networkCertificateFirst) {
+                identificationSent = true
+                awaitingCertificate = true
+                requestedFullCertificate = true
+                sendControl(0xaa00)
+            } else sendIdentification()
+        }
+
+        fun networkAuthenticated() {
+            onStage("网络 iAP2 已认证")
+            onNetworkAuthenticated()
+        }
+
+        if (initiateLink) {
+            // The phone initiates detection and SYN only on a selected outgoing accessory socket.
+            val sync = byteArrayOf(1, 4, 0x20, 0, 0, 100, 0, 50, 4, 3, 10, 0, 2)
+            output.write(detection)
+            output.write(frame(0x80, localSequence, 0, sync))
+            output.flush()
+            repliedToDetection = true
         }
         while (true) {
             if (incoming.readUnsignedByte() != 0xff) throw ProtocolException("Invalid iAP2 start byte")
@@ -97,7 +229,14 @@ internal object Iap2LinkProbe {
                     if (flags and 0x10 != 0) throw ProtocolException("Receiver reset the iAP2 link")
                     if (flags and 0x80 != 0) {
                         val parameters = packet.copyOfRange(9, length - 1)
-                        controlSession = controlSession(parameters)
+                        val (sessionId, controlVersion) = controlSession(parameters)
+                        if (identificationSent && sessionId != controlSession) {
+                            throw ProtocolException("iAP2 control session changed during authentication")
+                        }
+                        controlSession = sessionId
+                        if (!identificationSent) {
+                            networkCertificateFirst = expectedCertificate != null && protocol.isBmw && controlVersion == 1
+                        }
                         peerSequence = sequence
                         val reply = if (flags and 0x40 == 0) {
                             if (lastSyncRequest?.contentEquals(packet) == true) {
@@ -114,11 +253,11 @@ internal object Iap2LinkProbe {
                         output.flush()
                         synchronized = true
                         onStage("iAP2 链路已交换同步帧")
-                        if (flags and 0x40 != 0 && !identificationSent) sendIdentification()
+                        if (flags and 0x40 != 0 && !identificationSent) startControl()
                     } else if (synchronized && length == 9 && flags == 0x40 && !identificationSent &&
                         packet[6].toInt() and 255 == localSequence
                     ) {
-                        sendIdentification()
+                        startControl()
                     } else if (identificationSent && length > 9 && (packet[7].toInt() and 255) == controlSession) {
                         if (sequence != peerSequence && sequence != ((peerSequence + 1) and 255)) {
                             throw ProtocolException("Out-of-order iAP2 control frame")
@@ -135,31 +274,106 @@ internal object Iap2LinkProbe {
                         while (true) {
                             val message = takeMessage(controlData) ?: break
                             val id = unsignedShort(message, 4)
+                            if (!authenticated && awaitingCertificate && protocol.isVehicle && id == 0xae00) {
+                                pendingPowerRequest = message
+                                continue
+                            }
                             if (authenticated) {
+                                if (waitingForNetworkIdentity && id == 0x1d01) {
+                                    val identity = parameters(message, repeatableFields = identificationGroups)
+                                    val modelName = identity[1]?.toString(Charsets.UTF_8)?.substringBefore('\u0000')
+                                    val maker = identity[2]?.toString(Charsets.UTF_8)?.substringBefore('\u0000')
+                                    separatePowerUpdates = modelName.equals("MGU-55-BMW", ignoreCase = true) &&
+                                        maker.equals("BMW Group", ignoreCase = true)
+                                    sendControl(0x1d02)
+                                    waitingForNetworkIdentity = false
+                                    networkAuthenticated()
+                                    pendingPowerRequest?.let(::replyPower)
+                                    pendingPowerRequest = null
+                                    continue
+                                }
+                                if (waitingForNetworkIdentity) {
+                                    if (id == 0xae00) pendingPowerRequest = message
+                                    continue
+                                }
+                                if (id == 0xae00 && protocol.isVehicle) replyPower(message)
+                                if (endpointDelivered) continue
                                 if (expectedCertificate == null) {
                                     when (id) {
+                                        0x1d01 -> if (protocol == ReceiverProtocol.BMW_MGU && bmwAppsOnly) {
+                                            val update = parameters(message, repeatableFields = identificationGroups)
+                                            val updatedModel = update[1]?.toString(Charsets.UTF_8)?.substringBefore('\u0000')
+                                            if (!model.equals(updatedModel, ignoreCase = true)) {
+                                                throw ProtocolException("iAP2 接收端型号在连接中变化")
+                                            }
+                                            readCapabilities(update)
+                                            sendControl(0x1d02)
+                                            onBmwAppsWindow(bmwAppsOnly)
+                                            if (!bmwAppsOnly) startMguWifi()
+                                        }
                                         0x5703 -> if (wifi == null) {
                                             wifi = ReceiverWifi.fromConfiguration(parameters(message))
                                             wifi?.let(onWifi)
+                                            if (protocol == ReceiverProtocol.BMW_MGU && wifi != null) sendAvailability()
+                                            if (protocol == ReceiverProtocol.BMW_MGU && wifi != null &&
+                                                (legacyMguWifi || hasSendList && !declaresStartSession)) {
+                                                sendControl(0x4e0e, cString(deviceId))
+                                                val endpoint = Endpoint(null, null, checkNotNull(leaf), wifi, protocol)
+                                                if (!publishToBluetoothOwner(endpoint)) return endpoint
+                                            }
+                                            if (protocol == ReceiverProtocol.VOLKSWAGEN && !declaresStartSession) {
+                                                sendControl(0x4e0e, cString(deviceId))
+                                                return Endpoint(null, null, checkNotNull(leaf), wifi, protocol)
+                                            }
                                         }
                                         0x4301 -> {
-                                            val endpoint = receiverEndpoint(message, checkNotNull(leaf), wifi)
-                                            onStage("已收到 CarPlay 网络端点：${endpoint.host}:${endpoint.port}")
-                                            return endpoint
+                                            val endpoint = receiverEndpoint(message, checkNotNull(leaf), wifi, protocol, identityText)
+                                            if (protocol == ReceiverProtocol.BMW_MGU || protocol == ReceiverProtocol.VOLKSWAGEN) sendControl(0x4e0e, cString(deviceId))
+                                            val address = endpoint.host?.let { "$it:${endpoint.port}" }
+                                            onStage(if (address != null) "已收到 CarPlay 网络端点：$address"
+                                                else "已收到车机热点信息 · 等待 AirPlay 服务发现")
+                                            if (!publishToBluetoothOwner(endpoint)) return endpoint
                                         }
                                     }
                                 }
                             } else if (!awaitingCertificate) {
                                 if (id != 0x1d01) throw ProtocolException("Expected receiver identification")
-                                onStage("已收到 iAP2 接收端身份：${receiverIdentity(message)}")
-                                val receivedIds = parameters(message)[7]
-                                requestWifi = receivedIds != null && (0 until receivedIds.size - 1 step 2).any {
-                                    unsignedShort(receivedIds, it) == 0x5702
+                                identityText = receiverIdentity(message)
+                                onStage("已收到 iAP2 接收端身份：$identityText")
+                                val groups = mutableListOf<ByteArray>()
+                                val identity = parameters(message, repeatableFields = identificationGroups) { field, bytes ->
+                                    if (field in 0x0a..0x0c && groups.size < 8) groups += bytes
                                 }
+                                model = identity[1]?.toString(Charsets.UTF_8)?.substringBefore('\u0000').orEmpty()
+                                val manufacturer = identity[2]?.toString(Charsets.UTF_8)?.substringBefore('\u0000')
+                                protocol = profile.protocol.forReceiver(identityText, model, manufacturer)
+                                if (protocol != profile.protocol) onStage("已识别桌面接收端 · 使用通用 CarPlay 协议")
+                                separatePowerUpdates = protocol.isBmw &&
+                                    model.equals("MGU-55-BMW", ignoreCase = true) &&
+                                    manufacturer.equals("BMW Group", ignoreCase = true)
+                                if (protocol.isBmw && expectedCertificate == null) {
+                                    groups += (0x0a..0x0c).mapNotNull(identity::get)
+                                    for (group in groups.take(8)) {
+                                        val fields = try { parameters(group, start = 0) } catch (_: ProtocolException) { continue }
+                                        val protocolId = fields[0]?.singleOrNull()?.toInt()?.and(255) ?: continue
+                                        if (fields[1]?.isNotEmpty() == true) eaProtocolIds += protocolId
+                                    }
+                                }
+                                readCapabilities(identity)
                                 sendControl(0x1d02)
-                                sendControl(0xaa00)
+                                val askForSerial = protocol.isVehicle && containsMessage(identity[6], 0xaa06)
+                                sendControl(0xaa00, if (askForSerial) byteArrayOf() else null)
+                                requestedFullCertificate = !askForSerial
                                 awaitingCertificate = true
                             } else if (challenge == null) {
+                                if (id == 0xaa06 && protocol.isVehicle && !requestedFullCertificate) {
+                                    if (parameters(message)[0]?.isNotEmpty() != true) {
+                                        throw ProtocolException("车机未提供 MFi 序列号")
+                                    }
+                                    sendControl(0xaa00)
+                                    requestedFullCertificate = true
+                                    continue
+                                }
                                 if (id != 0xaa01) throw ProtocolException("Expected receiver certificate")
                                 val certificate = parameters(message)[0]
                                     ?: throw ProtocolException("Receiver did not provide a certificate")
@@ -188,10 +402,39 @@ internal object Iap2LinkProbe {
                                 authenticated = true
                                 // Availability group 1 contains parameter 0 (wireless available = true).
                                 if (expectedCertificate == null) {
-                                    if (requestWifi) sendControl(0x5702)
-                                    sendControl(0x4300, byteArrayOf(0, 5, 0, 0, 1), parameterId = 1)
+                                    when (protocol) {
+                                        ReceiverProtocol.GENERIC -> {
+                                            if (requestWifi) sendControl(0x5702)
+                                            sendAvailability()
+                                        }
+                                        ReceiverProtocol.BMW_MGU -> {
+                                            sendBmwGreetings()
+                                            onBmwAppsWindow(bmwAppsOnly)
+                                            if (bmwAppsOnly) onStage("宝马控制链路已认证 · 等待车机开启 CarPlay")
+                                            else {
+                                                openBmwAccessorySessions()
+                                                startMguWifi()
+                                            }
+                                        }
+                                        ReceiverProtocol.VOLKSWAGEN -> {
+                                            sendAvailability()
+                                            if (requestWifi || declaresWifiConfiguration) sendControl(0x5702)
+                                            else if (!declaresStartSession) {
+                                                sendControl(0x4e0e, cString(deviceId))
+                                                pendingPowerRequest?.let(::replyPower)
+                                                return Endpoint(null, null, checkNotNull(leaf), null, protocol)
+                                            }
+                                        }
+                                    }
+                                } else if (networkCertificateFirst) {
+                                    waitingForNetworkIdentity = true
+                                    sendIdentification()
                                 } else {
-                                    onStage("网络 iAP2 已认证")
+                                    networkAuthenticated()
+                                }
+                                if (!waitingForNetworkIdentity) {
+                                    pendingPowerRequest?.let(::replyPower)
+                                    pendingPowerRequest = null
                                 }
                             }
                         }
@@ -202,13 +445,13 @@ internal object Iap2LinkProbe {
         }
     }
 
-    private fun controlSession(parameters: ByteArray): Int {
+    private fun controlSession(parameters: ByteArray): Pair<Int, Int> {
         if (parameters.size < 13 || parameters[0] != 1.toByte() || (parameters.size - 10) % 3 != 0) {
             throw ProtocolException("Invalid iAP2 synchronization parameters")
         }
         for (offset in 10 until parameters.size step 3) {
             if (parameters[offset + 1] == 0.toByte() && parameters[offset] != 0.toByte()) {
-                return parameters[offset].toInt() and 255
+                return (parameters[offset].toInt() and 255) to (parameters[offset + 2].toInt() and 255)
             }
         }
         throw ProtocolException("Receiver did not advertise an iAP2 control session")
@@ -227,7 +470,10 @@ internal object Iap2LinkProbe {
         return message.copyOf(size)
     }
 
-    private fun parameters(message: ByteArray, start: Int = 6, repeatableFields: Set<Int> = emptySet()): Map<Int, ByteArray> {
+    private fun parameters(
+        message: ByteArray, start: Int = 6, repeatableFields: Set<Int> = emptySet(),
+        onRepeated: (Int, ByteArray) -> Unit = { _, _ -> },
+    ): Map<Int, ByteArray> {
         val fields = mutableMapOf<Int, ByteArray>()
         var offset = start
         while (offset < message.size) {
@@ -237,8 +483,9 @@ internal object Iap2LinkProbe {
             val field = unsignedShort(message, offset + 2)
             if (field !in fields) {
                 fields[field] = message.copyOfRange(offset + 4, offset + length)
-            } else if (field !in repeatableFields) {
-                throw ProtocolException("Duplicate iAP2 parameter")
+            } else {
+                if (field !in repeatableFields) throw ProtocolException("Duplicate iAP2 parameter")
+                onRepeated(field, message.copyOfRange(offset + 4, offset + length))
             }
             offset += length
         }
@@ -247,30 +494,79 @@ internal object Iap2LinkProbe {
 
     private fun receiverEndpoint(
         message: ByteArray, certificate: X509Certificate, configuration: ReceiverWifi?,
+        protocol: ReceiverProtocol,
+        identity: String?,
     ): Endpoint {
         val fields = parameters(message)
         val wireless = fields[1] ?: throw ProtocolException("Missing CarPlay network parameters")
         // Some receivers shift the wireless field IDs by one. Either layout can repeat its IP field.
-        val network = parameters(wireless, start = 0, repeatableFields = setOf(3, 4))
+        val alternatives = mutableListOf<ByteArray>()
+        val network = parameters(wireless, start = 0, repeatableFields = setOf(3, 4)) { _, bytes ->
+            if (protocol.isVehicle && alternatives.size < 8) alternatives.add(bytes)
+        }
         val offset = if (0 !in network && 5 in network) 1 else 0
-        val host = network[3 + offset]?.toString(Charsets.US_ASCII)?.substringBefore('\u0000')
-            ?.takeIf { it.isNotBlank() && it.all { character -> character in '!'..'~' } }
-            ?: throw ProtocolException("Missing CarPlay endpoint address")
-        val portBytes = fields[2]?.takeIf { it.size == 4 }
-            ?: throw ProtocolException("Invalid CarPlay endpoint port")
-        val port = java.nio.ByteBuffer.wrap(portBytes).int
-        if (port !in 1..65535) throw ProtocolException("Invalid CarPlay endpoint port")
-        val wifi = configuration ?: ReceiverWifi.fromStartSession(network, offset)
-        return Endpoint(host, port, certificate, wifi)
+        val primaryHost = network[3 + offset]?.let(::endpointText)
+        val layoutB = protocol.isVehicle && network[2]?.lastOrNull() == 0.toByte() &&
+            network[3]?.singleOrNull()?.toInt()?.let { it in 0..4 } == true &&
+            network[4]?.singleOrNull() != null
+        val wifi = if (!protocol.isVehicle) {
+            configuration ?: ReceiverWifi.fromStartSession(network, offset)
+        } else {
+            val advertised = if (layoutB) ReceiverWifi.fromConfiguration(network)
+                else ReceiverWifi.fromStartSession(network, offset)
+            if (configuration != null && advertised != null && configuration.ssid != advertised.ssid) {
+                throw ProtocolException("车机在协商期间更改热点，需重新连接")
+            }
+            configuration ?: advertised
+        }
+        val host = if (protocol.isVehicle) {
+            val alternateHosts = (alternatives + listOfNotNull(network[4], network[5], fields[7]))
+                .mapNotNull(::endpointText)
+            val numericAddresses = (listOfNotNull(primaryHost) + alternateHosts).filter(::isNumericAddress)
+            numericAddresses.firstOrNull { ':' !in it } ?: numericAddresses.firstOrNull()
+                ?: primaryHost.takeUnless { layoutB }
+        } else primaryHost
+        val portBytes = fields[2]
+        val port = portBytes?.let {
+            if (it.size != 4) throw ProtocolException("Invalid CarPlay endpoint port")
+            ByteBuffer.wrap(it).int.takeIf { value -> value in 1..65535 }
+                ?: throw ProtocolException("Invalid CarPlay endpoint port")
+        }
+        if ((host == null || port == null) && (!protocol.isVehicle || (wifi == null && protocol != ReceiverProtocol.VOLKSWAGEN))) {
+            throw ProtocolException("Missing CarPlay endpoint address or port")
+        }
+        return Endpoint(host, port, certificate, wifi, protocol, identity)
     }
+    private fun endpointText(bytes: ByteArray): String? =
+        bytes.toString(Charsets.US_ASCII).substringBefore('\u0000')
+            .takeIf { it.isNotBlank() && it.all { character -> character in '!'..'~' } }
+
+    private fun isNumericAddress(value: String): Boolean {
+        if (value.contains(':')) {
+            val unscoped = value.substringBefore('%')
+            return unscoped.count { it == ':' } >= 2 && !CarPlayScreenProbe.bluetoothAddress.matches(unscoped) &&
+                unscoped.all { it in "0123456789abcdefABCDEF:." }
+        }
+        val octets = value.split('.')
+        return octets.size == 4 && octets.all { it.toIntOrNull()?.let { number -> number in 0..255 } == true }
+    }
+
     private fun receiverIdentity(message: ByteArray): String {
-        val fields = parameters(message)
+        val fields = parameters(message, repeatableFields = identificationGroups)
         fun text(field: Int): String = fields[field]?.toString(Charsets.UTF_8)
             ?.substringBefore('\u0000')?.filterNot(Char::isISOControl)?.take(64).orEmpty()
         val name = text(0)
         if (name.isBlank()) throw ProtocolException("iAP2 receiver name is missing")
         return listOf(name, text(4)).filter(String::isNotEmpty).joinToString(" ")
     }
+
+    private fun cString(value: String) = value.toByteArray(Charsets.UTF_8) + 0.toByte()
+
+    private fun parameter(id: Int, value: ByteArray) = ByteBuffer.allocate(4 + value.size)
+        .putShort((4 + value.size).toShort()).putShort(id.toShort()).put(value).array()
+
+    private fun containsMessage(ids: ByteArray?, message: Int): Boolean =
+        ids != null && (0 until ids.size - 1 step 2).any { unsignedShort(ids, it) == message }
 
     private fun unsignedShort(bytes: ByteArray, offset: Int): Int =
         ((bytes[offset].toInt() and 255) shl 8) or (bytes[offset + 1].toInt() and 255)

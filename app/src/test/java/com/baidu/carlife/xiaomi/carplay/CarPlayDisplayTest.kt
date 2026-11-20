@@ -64,6 +64,19 @@ class CarPlayDisplayTest {
         CarPlayDisplay.fromReceiverInfo(info(display("cluster", 1280, 480, 111)))
     }
 
+    @Test
+    fun malformedDisplayDoesNotMaskAValidPrimaryDisplay() {
+        val malformed = display("broken", 1920, 0, 110)
+        val valid = display("main", 1920, 720, 110)
+        assertEquals("main", CarPlayDisplay.fromReceiverInfo(info(malformed, valid)).uuid)
+    }
+
+    @Test(expected = ProtocolException::class)
+    fun doesNotTreatWrongTypeAsAnUnspecifiedMainDisplay() {
+        val wrong = display("cluster", 1920, 720).apply { put("type", "111") }
+        CarPlayDisplay.fromReceiverInfo(info(wrong))
+    }
+
     private fun info(vararg displays: NSDictionary) = NSDictionary().apply {
         put("displays", NSArray(displays.size).apply {
             displays.forEachIndexed { index, display -> setValue(index, display) }

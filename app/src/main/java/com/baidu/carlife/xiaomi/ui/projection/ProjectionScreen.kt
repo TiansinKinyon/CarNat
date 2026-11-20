@@ -73,6 +73,7 @@ import com.baidu.carlife.service.ReceiverConnection
 import com.baidu.carlife.xiaomi.R
 import com.baidu.carlife.xiaomi.carplay.ReceiverSettings
 import com.baidu.carlife.xiaomi.carplay.ConnectionMode
+import com.baidu.carlife.xiaomi.carplay.HeadUnitProfile
 import com.baidu.carlife.xiaomi.carplay.ProjectionLinkStatus
 import com.baidu.carlife.xiaomi.carplay.connectionStatus
 import com.baidu.carlife.xiaomi.carplay.missingReceiverPermissions
@@ -85,6 +86,9 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val status by CarlifeConnectService.state.collectAsState()
     var mode by remember(context) { mutableStateOf(ConnectionMode.load(context)) }
     var autoNeedsPermissions by remember { mutableStateOf(missingReceiverPermissions(context).isNotEmpty()) }
+    val headUnitProfile by remember(context) { HeadUnitProfile.observe(context) }
+        .collectAsState(initial = HeadUnitProfile.load(context))
+    val volkswagen = headUnitProfile == HeadUnitProfile.VOLKSWAGEN
     var settings by remember { mutableStateOf(ReceiverSettings.load(context)) }
     var phoneAddress by rememberSaveable { mutableStateOf(settings.address.uppercase(Locale.ROOT)) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -121,6 +125,10 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
     val notificationPermissions = remember(context) {
         context.getSharedPreferences("projection_notifications", Context.MODE_PRIVATE)
     }
+    var ssidAccessRequested by remember { mutableStateOf(notificationPermissions.getBoolean("volkswagenSsidRequested", false)) }
+    val volkswagenNeedsSsidAccess = volkswagen && mode == ConnectionMode.CAR_WITH &&
+        context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+        !ssidAccessRequested
     val projectionPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (Manifest.permission.POST_NOTIFICATIONS in grants) {
             notificationPermissions.edit().putBoolean("requested", true).apply()
@@ -133,7 +141,7 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         modifier = modifier,
         status = status,
         manual = mode == ConnectionMode.MANUAL,
-        autoNeedsPermissions = autoNeedsPermissions,
+        autoNeedsPermissions = autoNeedsPermissions || volkswagenNeedsSsidAccess,
         settings = settings,
         phoneAddress = phoneAddress,
         onAddressChange = { input ->
@@ -152,14 +160,23 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
         onOpenDeviceInfo = { openDeviceInfoSettings(context) },
         error = error,
         supported = Build.VERSION.SDK_INT >= 33,
+        brandPicker = {
+            HeadUnitPicker(headUnitProfile, active && !status.active) { profile ->
+                if (!CarlifeConnectService.state.value.active) {
+                    profile.save(context)
+                    error = null
+                    expanded = false
+                }
+            }
+        },
         receiverPicker = {
             val selectedName = settings.name.takeIf { settings.receiverAddress.isNotEmpty() }.orEmpty()
             ReceiverPicker(
                 selectedName = selectedName,
                 selectedAddress = settings.receiverAddress,
                 devices = devices,
-                enabled = active && !status.active && mode == ConnectionMode.MANUAL,
-                managedByCarWith = mode == ConnectionMode.CAR_WITH,
+                enabled = active && !status.active && (mode == ConnectionMode.MANUAL || volkswagen),
+                managedByCarWith = mode == ConnectionMode.CAR_WITH && !volkswagen,
                 expanded = expanded && active,
                 onDismiss = { expanded = false },
                 onOpen = {
@@ -185,6 +202,12 @@ internal fun ProjectionScreen(active: Boolean, modifier: Modifier = Modifier) {
                 CarlifeConnectService.stopDiagnostic(context)
             } else {
                 val missing = missingReceiverPermissions(context).toMutableList()
+                if (volkswagenNeedsSsidAccess) {
+                    ssidAccessRequested = true
+                    notificationPermissions.edit().putBoolean("volkswagenSsidRequested", true).apply()
+                    missing.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                    missing.add(Manifest.permission.ACCESS_FINE_LOCATION)
+                }
                 if (Build.VERSION.SDK_INT >= 33 &&
                     context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
                     !notificationPermissions.getBoolean("requested", false)
@@ -209,6 +232,7 @@ private fun ProjectionContent(
     onOpenDeviceInfo: () -> Unit,
     error: String?,
     supported: Boolean,
+    brandPicker: @Composable () -> Unit,
     receiverPicker: @Composable () -> Unit,
     onProjectionClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -287,6 +311,7 @@ private fun ProjectionContent(
                         }
                     }
                 }
+                brandPicker()
                 receiverPicker()
                 OutlinedTextField(
                     leadingIcon = { Icon(painterResource(R.drawable.ic_settings_bluetooth), contentDescription = null) },
@@ -518,6 +543,7 @@ private fun ProjectionPreviewContent(status: CaptureStatus, manual: Boolean = tr
         onOpenDeviceInfo = {},
         error = null,
         supported = true,
+        brandPicker = { HeadUnitPicker(HeadUnitProfile.GENERIC, !status.active) {} },
         receiverPicker = {
             ReceiverPicker(
                 selectedName = "CarPlay 接收端",
@@ -546,6 +572,60 @@ private fun pairedReceivers(context: Context): List<PairedReceiver>? = try {
     }.sortedWith(compareBy({ it.name }, { it.address }))
 } catch (_: SecurityException) {
     null
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HeadUnitPicker(
+    selected: HeadUnitProfile,
+    enabled: Boolean,
+    onSelect: (HeadUnitProfile) -> Unit,
+) {
+    var expanded by remember(enabled) { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { if (enabled) expanded = it },
+    ) {
+        OutlinedTextField(
+            value = selected.label,
+            onValueChange = {},
+            enabled = enabled,
+            readOnly = true,
+            singleLine = true,
+            leadingIcon = { Icon(painterResource(R.drawable.ic_car_gear), contentDescription = null) },
+            label = { Text("车机品牌") },
+            supportingText = {
+                Text(when (selected) {
+                    HeadUnitProfile.GENERIC -> "DiPlay、WinPlay 或不确定车型时选通用。"
+                    HeadUnitProfile.BMW -> "在 iDrive 中选择 Apple CarPlay 并确认授权。"
+                    HeadUnitProfile.VOLKSWAGEN -> "选已配对车机，填本机蓝牙地址，连车机 Wi-Fi。"
+                })
+            },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled).fillMaxWidth(),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ) {
+            HeadUnitProfile.entries.forEach { profile ->
+                DropdownMenuItem(
+                    text = { Text(profile.label) },
+                    trailingIcon = {
+                        if (profile == selected) {
+                            Icon(painterResource(R.drawable.ic_check_circle), contentDescription = "当前选中")
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(profile)
+                    },
+                )
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

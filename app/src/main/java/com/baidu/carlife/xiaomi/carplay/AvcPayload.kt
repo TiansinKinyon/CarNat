@@ -83,7 +83,7 @@ internal object AvcPayload {
         return true
     }
 
-    private fun splitAnnexB(data: ByteArray): List<ByteArray> {
+    fun splitAnnexB(data: ByteArray): List<ByteArray> {
         val units = mutableListOf<ByteArray>()
         var start = -1
         var zeros = 0
@@ -95,7 +95,7 @@ internal object AvcPayload {
                     if (start < 0 && end != 0) return emptyList()
                     if (start >= 0) {
                         require(end > start) { "Empty Annex B NAL unit" }
-                        require(units.size < MAX_ANNEX_B_UNITS) { "Too many AVC NAL units" }
+                        require(units.size < MAX_ANNEX_B_UNITS) { "Too many Annex B NAL units" }
                         units += data.copyOfRange(start, end)
                     }
                     start = index + 1
@@ -107,7 +107,7 @@ internal object AvcPayload {
         if (start >= 0) {
             val end = data.size - zeros
             require(end > start) { "Empty Annex B NAL unit" }
-            require(units.size < MAX_ANNEX_B_UNITS) { "Too many AVC NAL units" }
+            require(units.size < MAX_ANNEX_B_UNITS) { "Too many Annex B NAL units" }
             units += data.copyOfRange(start, end)
         }
         return units

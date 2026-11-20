@@ -58,6 +58,7 @@ private fun MonitoringContent(capture: CaptureStatus, receiver: ReceiverDiagnost
             Metric("输出分辨率", resolutionLabel(capture.outputWidth, capture.outputHeight))
             Metric("输出帧率上限", capture.encoderFpsLimit?.let { "$it fps" })
             Metric("实时帧率", capture.outputFps?.let { "%.1f fps".format(it) })
+            Metric("视频编码", capture.videoCodec)
             Metric("视频目标码率", capture.targetVideoBitrateKbps?.let { "$it Kbps" })
             Metric("视频输出码率", capture.outputMbps?.let { "%.2f Mbps".format(it) })
             Metric("累计输出帧数", capture.frames.takeIf { capture.outputFps != null || it > 0 }?.toString())

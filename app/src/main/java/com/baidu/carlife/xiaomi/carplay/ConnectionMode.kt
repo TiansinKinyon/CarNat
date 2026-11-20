@@ -16,7 +16,7 @@ internal enum class ConnectionMode(val label: String, val summary: String) {
             context.getSharedPreferences("connection_mode", Context.MODE_PRIVATE)
 
         fun load(context: Context): ConnectionMode {
-            val saved = preferences(context).getString("mode", null)
+            val saved = preferences(context).all["mode"] as? String
             return entries.firstOrNull { it.name == saved } ?: CAR_WITH
         }
 

@@ -36,6 +36,7 @@ internal object CarPlayControlRecords {
             }
 
             private fun readable(): Boolean {
+                var emptyRecords = 0
                 while (position == plaintext.size) {
                     val low = stream.read()
                     if (low == -1) return false
@@ -47,11 +48,14 @@ internal object CarPlayControlRecords {
                     var received = 0
                     while (received < ciphertext.size) {
                         val count = stream.read(ciphertext, received, ciphertext.size - received)
-                        if (count == -1) throw EOFException("Truncated CarPlay control record")
+                        if (count <= 0) throw EOFException("Truncated CarPlay control record")
                         received += count
                     }
                     plaintext = cipher.process(header, ciphertext, 0, ciphertext.size)
                     position = 0
+                    if (plaintext.isEmpty() && ++emptyRecords > 16) {
+                        throw ProtocolException("Too many empty CarPlay control records")
+                    }
                 }
                 return true
             }
