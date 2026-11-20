@@ -60,8 +60,24 @@ internal object ReleaseClient {
             val status = connection.responseCode
             if (status != 200) throw ReleaseHttpException(status)
 
-            val response = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val releases = JSONArray(response)
+            val limit = 1_048_576
+            if (connection.contentLength > limit) throw IOException("更新信息超过大小限制")
+            val response = connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                val buffer = CharArray(8192)
+                val text = StringBuilder()
+                while (true) {
+                    val count = reader.read(buffer)
+                    if (count < 0) break
+                    if (count > limit - text.length) throw IOException("更新信息超过大小限制")
+                    text.append(buffer, 0, count)
+                }
+                text.toString()
+            }
+            val releases = try {
+                JSONArray(response)
+            } catch (failure: StackOverflowError) {
+                throw IOException("更新信息嵌套过深", failure)
+            }
             var latest: UpdateRelease? = null
             for (index in 0 until releases.length()) {
                 val release = releases.optJSONObject(index) ?: throw JSONException("Expected a release object")
@@ -69,7 +85,7 @@ internal object ReleaseClient {
                 val tag = release.optString("tag_name")
                 val version = ReleaseVersion.parse(tag) ?: continue
                 if (latest == null || version > latest.version) {
-                    val notes = if (release.isNull("body")) "" else release.getString("body").trim()
+                    val notes = (release.opt("body") as? String).orEmpty().trim().take(32_768)
                     latest = UpdateRelease(tag, version, notes)
                 }
             }
