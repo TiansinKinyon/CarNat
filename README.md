@@ -44,6 +44,7 @@ macOS 和 Linux 可使用 `./gradlew :app:assembleDebug :app:testDebugUnitTest`�
 - [CarDeck](https://github.com/shaonialife/cardeck) 提供了 Android 作为无线 CarPlay 发送端的实现和协议笔记。
 - [mCarPlay](https://github.com/wangxso/mcarplay) 提供了小米 CarWith 到无线 CarPlay 的桥接实现及接收端兼容性记录。
 - [CarPToCarL](https://github.com/jjuugk/CarPToCarL) 提供了车机发现、音频和重连的实车记录。
+- [HyperCar](https://github.com/fw867/hypercar) 提供了宝马与大众车机的具体连接实现
 - CarLife+ Bridge 参考了其通过替换 CarLife 组件实现连接的思路。
 
 ## 许可
